@@ -370,6 +370,8 @@ pub fn init(cx: &mut App) {
         },
     )
     .detach();
+    cx.observe_new(items::register_lsp_show_document_handler)
+        .detach();
 
     cx.on_action(move |_: &workspace::NewFile, cx| {
         let app_state = workspace::AppState::global(cx);
