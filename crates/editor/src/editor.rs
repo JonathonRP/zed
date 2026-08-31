@@ -1596,7 +1596,7 @@ pub(crate) enum InlineInputPreview {
 const INLINE_INPUT_PREVIEW_MAX_LINES: usize = 8;
 
 impl InlineInputPreview {
-    fn display_lines(&self) -> Vec<SharedString> {
+    fn display_lines(&self, max_lines: usize) -> Vec<SharedString> {
         let text = match self {
             InlineInputPreview::Text(text) => text,
             InlineInputPreview::Error(message) => message,
@@ -1614,15 +1614,16 @@ impl InlineInputPreview {
         if lines.is_empty() {
             lines.push(SharedString::from(" "));
         }
-        if lines.len() > INLINE_INPUT_PREVIEW_MAX_LINES {
-            lines.truncate(INLINE_INPUT_PREVIEW_MAX_LINES);
-            lines.push(SharedString::from("…"));
+        if lines.len() > max_lines {
+            let hidden_lines = lines.len() - max_lines;
+            lines.truncate(max_lines);
+            lines.push(SharedString::from(format!("… +{hidden_lines} more lines")));
         }
         lines
     }
 
-    fn height_in_lines(&self) -> u32 {
-        self.display_lines().len() as u32
+    fn height_in_lines(&self, max_lines: usize) -> u32 {
+        self.display_lines(max_lines).len() as u32
     }
 }
 
@@ -8403,7 +8404,11 @@ impl Editor {
                 style: BlockStyle::Flex,
                 placement: BlockPlacement::Below(position),
                 height: Some(1),
-                render: Self::render_inline_input_block(input.clone(), None),
+                render: Self::render_inline_input_block(
+                    input.clone(),
+                    None,
+                    self.inline_input_preview_max_lines(),
+                ),
                 priority: 0,
             }],
             Some(Autoscroll::fit()),
@@ -8429,6 +8434,7 @@ impl Editor {
     fn render_inline_input_block(
         input: Entity<Editor>,
         preview: Option<InlineInputPreview>,
+        max_lines: usize,
     ) -> RenderBlock {
         Arc::new(move |cx: &mut BlockContext| {
             v_flex()
@@ -8452,7 +8458,7 @@ impl Editor {
                         InlineInputPreview::Text(_) => cx.theme().colors().text_muted,
                         InlineInputPreview::Error(_) => cx.theme().status().error,
                     };
-                    this.children(preview.display_lines().into_iter().map(|line| {
+                    this.children(preview.display_lines(max_lines).into_iter().map(|line| {
                         div()
                             .font_family(text_style.font().family)
                             .text_size(text_style.font_size)
@@ -8464,11 +8470,17 @@ impl Editor {
         })
     }
 
+    fn inline_input_preview_max_lines(&self) -> usize {
+        let half_viewport = (self.visible_line_count().unwrap_or(0.) / 2.).floor() as usize;
+        half_viewport.max(INLINE_INPUT_PREVIEW_MAX_LINES)
+    }
+
     pub(crate) fn set_inline_input_preview(
         &mut self,
         preview: Option<InlineInputPreview>,
         cx: &mut Context<Self>,
     ) {
+        let max_lines = self.inline_input_preview_max_lines();
         let Some(state) = self.pending_inline_input.as_mut() else {
             return;
         };
@@ -8476,16 +8488,19 @@ impl Editor {
         let input = state.editor.clone();
         let height = 1 + preview
             .as_ref()
-            .map_or(0, InlineInputPreview::height_in_lines);
+            .map_or(0, |preview| preview.height_in_lines(max_lines));
         let previous = mem::replace(&mut state.preview, preview.clone());
         let previous_height = 1 + previous
             .as_ref()
-            .map_or(0, InlineInputPreview::height_in_lines);
+            .map_or(0, |preview| preview.height_in_lines(max_lines));
         let autoscroll = (height != previous_height).then_some(Autoscroll::fit());
         self.replace_blocks(
-            [(block_id, Self::render_inline_input_block(input, preview))]
-                .into_iter()
-                .collect(),
+            [(
+                block_id,
+                Self::render_inline_input_block(input, preview, max_lines),
+            )]
+            .into_iter()
+            .collect(),
             None,
             cx,
         );

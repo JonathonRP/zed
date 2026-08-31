@@ -226,11 +226,7 @@ fn selection_lines(
     if text.is_empty() {
         return None;
     }
-    let row = MultiBufferRow(range_start.to_point(snapshot).row);
-    let base_indent = snapshot
-        .indent_size_for_line(row)
-        .chars()
-        .collect::<String>();
+    let base_indent = base_indent_for(range_start, snapshot);
     let lines = text
         .split('\n')
         .enumerate()
@@ -349,8 +345,13 @@ fn wrap_targets_in_expanded_abbreviation(
                 }
                 let snapshot = editor.buffer().read(cx).snapshot(cx);
                 if let [(range, expansion)] = expansions.as_slice() {
-                    let expansion =
-                        normalize_expansion_indentation(expansion, range.start, &snapshot, cx);
+                    let expansion = normalize_expansion_indentation(
+                        expansion,
+                        &base_indent_for(range.start, &snapshot),
+                        range.start,
+                        &snapshot,
+                        cx,
+                    );
                     if let Ok(snippet) = Snippet::parse(&expansion) {
                         let range =
                             range.start.to_offset(&snapshot)..range.end.to_offset(&snapshot);
@@ -367,7 +368,9 @@ fn wrap_targets_in_expanded_abbreviation(
                 let edits = expansions
                     .into_iter()
                     .map(|(range, expansion)| {
-                        let text = expansion_text(&expansion, range.start, &snapshot, cx);
+                        let base_indent = base_indent_for(range.start, &snapshot);
+                        let text =
+                            expansion_text(&expansion, &base_indent, range.start, &snapshot, cx);
                         (range, text)
                     })
                     .collect::<Vec<_>>();
@@ -418,6 +421,7 @@ fn update_expansion_preview(
                         let snapshot = editor.buffer().read(cx).snapshot(cx);
                         InlineInputPreview::Text(expansion_text(
                             &expansion,
+                            "",
                             target_range.start,
                             &snapshot,
                             cx,
@@ -462,11 +466,13 @@ fn request_expansion(
 
 fn expansion_text(
     expansion: &str,
+    base_indent: &str,
     range_start: Anchor,
     snapshot: &MultiBufferSnapshot,
     cx: &App,
 ) -> String {
-    let expansion = normalize_expansion_indentation(expansion, range_start, snapshot, cx);
+    let expansion =
+        normalize_expansion_indentation(expansion, base_indent, range_start, snapshot, cx);
     Snippet::parse(&expansion)
         .map(|snippet| snippet.text)
         .unwrap_or(expansion)
@@ -476,8 +482,14 @@ fn log_unavailable() {
     log::info!("Wrapping with an Emmet abbreviation is not available for the selected text");
 }
 
+fn base_indent_for(range_start: Anchor, snapshot: &MultiBufferSnapshot) -> String {
+    let row = MultiBufferRow(range_start.to_point(snapshot).row);
+    snapshot.indent_size_for_line(row).chars().collect()
+}
+
 fn normalize_expansion_indentation(
     expansion: &str,
+    base_indent: &str,
     range_start: Anchor,
     snapshot: &MultiBufferSnapshot,
     cx: &App,
@@ -485,11 +497,6 @@ fn normalize_expansion_indentation(
     if !expansion.contains('\n') {
         return expansion.to_string();
     }
-    let start_point = range_start.to_point(snapshot);
-    let base_indent = snapshot
-        .indent_size_for_line(MultiBufferRow(start_point.row))
-        .chars()
-        .collect::<String>();
     let settings = snapshot.language_settings_at(range_start, cx);
     let indent_unit = if settings.hard_tabs {
         "\t".to_string()
@@ -500,7 +507,7 @@ fn normalize_expansion_indentation(
     for (ix, line) in expansion.split('\n').enumerate() {
         if ix > 0 {
             normalized.push('\n');
-            normalized.push_str(&base_indent);
+            normalized.push_str(base_indent);
         }
         let tabs = line.chars().take_while(|ch| *ch == '\t').count();
         for _ in 0..tabs {
@@ -924,6 +931,60 @@ mod tests {
                 "clearing the input should clear the preview"
             );
         });
+    }
+
+    #[gpui::test]
+    async fn test_preview_does_not_embed_base_indentation(cx: &mut TestAppContext) {
+        let (editor, mut fake_servers, cx) =
+            setup("<section>\n  <p>a</p>\n  <p>b</p>\n</section>", cx).await;
+        let fake_server = fake_servers.next().await.unwrap();
+        cx.executor().run_until_parked();
+
+        select_and_wrap(&editor, [Point::new(1, 2)..Point::new(2, 10)], cx);
+
+        let mut requests = fake_server.set_request_handler::<LspExpandAbbreviation, _, _>(
+            |params, _| async move {
+                assert_eq!(params.abbreviation, "div");
+                Ok(Some("<div>\n\t<p>a</p>\n\t<p>b</p>\n</div>".to_string()))
+            },
+        );
+
+        editor.update_in(cx, |editor, window, cx| {
+            let input = pending_input(editor);
+            input.update(cx, |input, cx| input.set_text("div", window, cx));
+        });
+        cx.executor().advance_clock(PREVIEW_DEBOUNCE * 2);
+        requests.next().await.unwrap();
+        cx.executor().run_until_parked();
+
+        editor.update(cx, |editor, _| {
+            assert_eq!(
+                editor
+                    .pending_inline_input
+                    .as_ref()
+                    .and_then(|state| state.preview.clone()),
+                Some(InlineInputPreview::Text(
+                    "<div>\n    <p>a</p>\n    <p>b</p>\n</div>".to_string()
+                )),
+                "the preview block already renders at the anchor column, \
+                 so its lines must not repeat the wrapped line's base indentation"
+            );
+        });
+    }
+
+    #[test]
+    fn test_preview_truncation_reports_hidden_lines() {
+        let text = (1..=12)
+            .map(|ix| format!("line{ix}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = InlineInputPreview::Text(text);
+        let lines = preview.display_lines(8);
+        assert_eq!(lines.len(), 9);
+        assert_eq!(lines[8].as_ref(), "… +4 more lines");
+        assert_eq!(preview.height_in_lines(8), 9);
+        assert_eq!(preview.display_lines(12).len(), 12);
+        assert_eq!(preview.height_in_lines(12), 12);
     }
 
     #[gpui::test]
