@@ -10433,7 +10433,6 @@ dependencies = [
  "log",
  "lsp",
  "menu",
- "notifications",
  "picker",
  "project",
  "serde_json",
