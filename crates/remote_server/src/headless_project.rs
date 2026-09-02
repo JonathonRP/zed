@@ -573,9 +573,9 @@ impl HeadlessProject {
             }
         });
 
-        // We spawn this asynchronously, so that we can send the response back
-        // *before* `worktree_store.add()` can send out UpdateProject requests
-        // to the client about the new worktree.
+        // Add the worktree immediately so a subsequent OpenBufferByPath request
+        // cannot overtake it. Defer only the UpdateProject notification so the
+        // AddWorktree response still reaches the client first.
         //
         // That lets the client manage the reference/handles of the newly-added
         // worktree, before getting interrupted by an UpdateProject request.
@@ -585,10 +585,15 @@ impl HeadlessProject {
         // and immediately dropping the reference of the new client, causing it
         // to be dropped on the headless project, and the client only then
         // receiving a response to AddWorktree.
+        this.update(&mut cx, |this, cx| {
+            this.worktree_store.update(cx, |worktree_store, cx| {
+                worktree_store.add_without_sending_project_updates(&worktree, cx);
+            });
+        });
         cx.spawn(async move |cx| {
             this.update(cx, |this, cx| {
                 this.worktree_store.update(cx, |worktree_store, cx| {
-                    worktree_store.add(&worktree, cx);
+                    worktree_store.send_project_updates(cx)
                 });
             });
         })

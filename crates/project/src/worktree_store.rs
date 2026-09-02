@@ -958,6 +958,15 @@ impl WorktreeStore {
     }
 
     pub fn add(&mut self, worktree: &Entity<Worktree>, cx: &mut Context<Self>) {
+        self.add_without_sending_project_updates(worktree, cx);
+        self.send_project_updates(cx);
+    }
+
+    pub fn add_without_sending_project_updates(
+        &mut self,
+        worktree: &Entity<Worktree>,
+        cx: &mut Context<Self>,
+    ) {
         let worktree_id = worktree.read(cx).id();
         debug_assert!(self.worktrees().all(|w| w.read(cx).id() != worktree_id));
 
@@ -970,7 +979,6 @@ impl WorktreeStore {
         self.worktrees.push(handle);
 
         cx.emit(WorktreeStoreEvent::WorktreeAdded(worktree.clone()));
-        self.send_project_updates(cx);
 
         let handle_id = worktree.entity_id();
         cx.subscribe(worktree, |_, worktree, event, cx| {
