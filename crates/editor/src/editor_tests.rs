@@ -54,8 +54,8 @@ use serde_json::{self, json};
 use settings::{
     AllLanguageSettingsContent, DelayMs, EditorSettingsContent, GlobalLspSettingsContent,
     GoToDefinitionScrollStrategy, IndentGuideBackgroundColoring, IndentGuideColoring,
-    InlayHintSettingsContent, ProjectSettingsContent, ScrollBeyondLastLine, SearchSettingsContent,
-    SettingsContent, SettingsStore,
+    InlayHintSettingsContent, LspDocumentColorInlayShape, ProjectSettingsContent,
+    ScrollBeyondLastLine, SearchSettingsContent, SettingsContent, SettingsStore,
 };
 use std::{
     borrow::Cow,
@@ -83,6 +83,24 @@ fn display_ranges(editor: &Editor, cx: &mut Context<'_, Editor>) -> Vec<Range<Di
     editor
         .selections
         .display_ranges(&editor.display_snapshot(cx))
+}
+
+#[gpui::test]
+fn test_lsp_document_color_inlay_shape_setting(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    assert_eq!(
+        cx.update(|cx| EditorSettings::get_global(cx).lsp_document_color_inlay_shape),
+        LspDocumentColorInlayShape::Square
+    );
+
+    update_test_editor_settings(cx, &|settings| {
+        settings.lsp_document_color_inlay_shape = Some(LspDocumentColorInlayShape::Circle);
+    });
+
+    assert_eq!(
+        cx.update(|cx| EditorSettings::get_global(cx).lsp_document_color_inlay_shape),
+        LspDocumentColorInlayShape::Circle
+    );
 }
 
 #[cfg(any(test, feature = "test-support"))]
