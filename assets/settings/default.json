@@ -1638,6 +1638,13 @@
   // 4. Draw a background behind the color text..
   //      "lsp_document_colors": "background",
   "lsp_document_colors": "inlay",
+  // Shape of LSP `textDocument/documentColor` inlay swatches.
+  // This setting only applies when `lsp_document_colors` is set to `inlay`.
+  //
+  // Possible values: "square", "circle"
+  //
+  // Default: "square"
+  "lsp_document_color_inlay_shape": "square",
   // Whether to query and display LSP `textDocument/documentLink` links in the editor.
   //
   // Default: true
