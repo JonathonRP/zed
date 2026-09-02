@@ -399,6 +399,8 @@ TBD: Centered layout related settings
 
   // How to render LSP `textDocument/documentColor` colors in the editor.
   "lsp_document_colors": "inlay",        // none, inlay, border, background
+  // Shape of document color inlays. Only applies when lsp_document_colors is inlay.
+  "lsp_document_color_inlay_shape": "square", // square, circle
   // Whether to query and display LSP document links in the editor.
   "lsp_document_links": true,
   // When to show the scrollbar in the completion menu.

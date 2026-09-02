@@ -6,7 +6,8 @@
 //! [`InlaySnapshot`], which holds a sum tree of [`Transform`]s.
 
 use crate::{
-    ChunkRenderer, HighlightStyles,
+    ChunkRenderer, EditorSettings, HighlightStyles,
+    editor_settings::LspDocumentColorInlayShape,
     inlays::{Inlay, InlayContent},
 };
 use collections::BTreeSet;
@@ -16,6 +17,7 @@ use multi_buffer::{
     RowInfo, ToOffset,
 };
 use project::InlayId;
+use settings::Settings as _;
 use smallvec::SmallVec;
 use std::{
     cmp, iter,
@@ -24,7 +26,7 @@ use std::{
 };
 use sum_tree::{Bias, Cursor, Dimensions, SumTree};
 use text::{ChunkBitmaps, Patch};
-use ui::{ActiveTheme, IntoElement as _, ParentElement as _, Styled as _, div};
+use ui::{ActiveTheme, FluentBuilder as _, IntoElement as _, ParentElement as _, Styled as _, div};
 
 use super::{Highlights, custom_highlights::CustomHighlightsChunks, fold_map::ChunkRendererId};
 
@@ -376,6 +378,8 @@ impl<'a> Iterator for InlayChunks<'a> {
                             renderer = Some(ChunkRenderer {
                                 id: ChunkRendererId::Inlay(inlay.id),
                                 render: Arc::new(move |cx| {
+                                    let shape = EditorSettings::get_global(cx)
+                                        .lsp_document_color_inlay_shape;
                                     div()
                                         .relative()
                                         .size_3p5()
@@ -384,6 +388,10 @@ impl<'a> Iterator for InlayChunks<'a> {
                                                 .absolute()
                                                 .right_1()
                                                 .size_3()
+                                                .when(
+                                                    shape == LspDocumentColorInlayShape::Circle,
+                                                    |swatch| swatch.rounded_full(),
+                                                )
                                                 .border_1()
                                                 .border_color(
                                                     if cx.theme().appearance().is_light() {
