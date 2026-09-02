@@ -3277,6 +3277,17 @@ Configuration for various AI model providers including API URLs and authenticati
 3. `border`: Draw a border around the color text.
 4. `none`: Do not query and render document colors.
 
+## LSP Document Color Inlay Shape
+
+- Description: Shape of LSP `textDocument/documentColor` inlay swatches. This setting only applies when `lsp_document_colors` is set to `inlay`.
+- Setting: `lsp_document_color_inlay_shape`
+- Default: `square`
+
+**Options**
+
+1. `square`: Render document color inlays as squares.
+2. `circle`: Render document color inlays as circles.
+
 ## LSP Document Links
 
 - Description: Whether to query and display LSP `textDocument/documentLink` links in the editor
