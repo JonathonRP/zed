@@ -7,9 +7,6 @@ on:
         description: Publish the completed packages as a GitHub Release
         type: boolean
         default: true
-  pull_request:
-    branches:
-      - release/rp-stable
   push:
     branches:
       - release/rp-stable
