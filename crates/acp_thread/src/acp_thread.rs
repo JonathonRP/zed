@@ -35,6 +35,8 @@ use std::fmt::{Formatter, Write};
 use std::ops::Range;
 use std::process::ExitStatus;
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use std::{fmt::Display, mem, path::PathBuf, sync::Arc};
 use task::{Shell, ShellBuilder};
@@ -870,6 +872,8 @@ pub struct ToolCall {
     #[cfg(test)]
     location_resolution_attempts: usize,
     #[cfg(test)]
+    location_open_attempts: Arc<AtomicUsize>,
+    #[cfg(test)]
     location_resolution_completed_generation: Option<u64>,
     pub raw_input: Option<serde_json::Value>,
     pub raw_input_markdown: Option<Entity<Markdown>>,
@@ -946,6 +950,8 @@ impl ToolCall {
             location_resolution_generation: 0,
             #[cfg(test)]
             location_resolution_attempts: 0,
+            #[cfg(test)]
+            location_open_attempts: Arc::default(),
             #[cfg(test)]
             location_resolution_completed_generation: None,
             status,
@@ -1194,19 +1200,49 @@ impl ToolCall {
     async fn resolve_location(
         location: acp::ToolCallLocation,
         project: WeakEntity<Project>,
+        #[cfg(test)] location_open_attempts: Arc<AtomicUsize>,
         cx: &mut AsyncApp,
     ) -> Option<ResolvedLocation> {
+        let path = location.path.to_string_lossy().into_owned();
+        let should_preflight = project
+            .update(cx, |project, _| {
+                project.is_local() || project.is_via_remote_server()
+            })
+            .ok()?;
+        let path = if should_preflight {
+            let resolved_path = project
+                .update(cx, |project, cx| {
+                    if !is_absolute(&path, project.path_style(cx)) {
+                        return None;
+                    }
+                    Some(project.resolve_abs_text_file_path(&path, cx))
+                })
+                .ok()??
+                .await?;
+            PathBuf::from(resolved_path.abs_path()?)
+        } else {
+            // Collaborative guests cannot stat files on the host, but their worktree snapshot
+            // can still reject missing paths and directories without opening a buffer.
+            project
+                .update(cx, |project, cx| {
+                    let project_path =
+                        project.project_path_for_absolute_path(&location.path, cx)?;
+                    project
+                        .entry_for_path(&project_path, cx)
+                        .is_some_and(|entry| !entry.is_dir())
+                        .then(|| location.path.clone())
+                })
+                .ok()??
+        };
+
         let buffer = project
             .update(cx, |project, cx| {
-                if let Some(path) = project.project_path_for_absolute_path(&location.path, cx) {
+                #[cfg(test)]
+                location_open_attempts.fetch_add(1, Ordering::SeqCst);
+                if let Some(path) = project.project_path_for_absolute_path(&path, cx) {
                     Some(project.open_buffer(path, cx))
-                } else if is_absolute(
-                    location.path.to_string_lossy().as_ref(),
-                    project.path_style(cx),
-                ) {
-                    Some(project.open_local_buffer(&location.path, cx))
                 } else {
-                    None
+                    Some(project.open_local_buffer(&path, cx))
                 }
             })
             .ok()??;
@@ -1237,13 +1273,23 @@ impl ToolCall {
     fn resolve_locations(
         locations: Vec<acp::ToolCallLocation>,
         project: Entity<Project>,
+        #[cfg(test)] location_open_attempts: Arc<AtomicUsize>,
         cx: &mut App,
     ) -> Task<Vec<Option<ResolvedLocation>>> {
         project.update(cx, |_, cx| {
             cx.spawn(async move |project, cx| {
                 let mut new_locations = Vec::new();
                 for location in locations {
-                    new_locations.push(Self::resolve_location(location, project.clone(), cx).await);
+                    new_locations.push(
+                        Self::resolve_location(
+                            location,
+                            project.clone(),
+                            #[cfg(test)]
+                            location_open_attempts.clone(),
+                            cx,
+                        )
+                        .await,
+                    );
                 }
                 new_locations
             })
@@ -3228,6 +3274,8 @@ impl AcpThread {
                     #[cfg(test)]
                     location_resolution_attempts: 0,
                     #[cfg(test)]
+                    location_open_attempts: Arc::default(),
+                    #[cfg(test)]
                     location_resolution_completed_generation: None,
                     raw_input: None,
                     raw_input_markdown: None,
@@ -3248,7 +3296,6 @@ impl AcpThread {
 
         match update {
             ToolCallUpdate::UpdateFields(update) => {
-                let location_updated = update.fields.locations.is_some();
                 call.update_fields(
                     update.fields,
                     update.meta,
@@ -3257,9 +3304,7 @@ impl AcpThread {
                     &self.terminals,
                     cx,
                 )?;
-                if location_updated {
-                    self.resolve_locations_if_needed(update.tool_call_id, cx);
-                }
+                self.resolve_locations_if_needed(update.tool_call_id, cx);
             }
             ToolCallUpdate::UpdateDiff(update) => {
                 call.content.clear();
@@ -3417,10 +3462,7 @@ impl AcpThread {
         let Some((_, tool_call)) = self.tool_call(&id) else {
             return;
         };
-        if matches!(
-            tool_call.status,
-            ToolCallStatus::Failed | ToolCallStatus::Rejected | ToolCallStatus::Canceled
-        ) {
+        if !matches!(tool_call.status, ToolCallStatus::Completed) {
             return;
         }
 
@@ -3446,7 +3488,15 @@ impl AcpThread {
         let Some((locations, generation)) = tool_call.begin_location_resolution(force) else {
             return;
         };
-        let task = ToolCall::resolve_locations(locations.clone(), project, cx);
+        #[cfg(test)]
+        let location_open_attempts = tool_call.location_open_attempts.clone();
+        let task = ToolCall::resolve_locations(
+            locations.clone(),
+            project,
+            #[cfg(test)]
+            location_open_attempts,
+            cx,
+        );
         cx.spawn(async move |this, cx| {
             let resolved_locations = task.await;
 
@@ -6484,7 +6534,7 @@ mod tests {
         let fs = FakeFs::new(cx.executor());
         fs.insert_tree(path!("/project"), json!({ "file.txt": "body" }))
             .await;
-        let project = Project::test(fs, [Path::new(path!("/project"))], cx).await;
+        let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
         let connection = Rc::new(FakeAgentConnection::new());
         let thread = cx
             .update(|cx| {
@@ -6493,28 +6543,143 @@ mod tests {
             .await
             .unwrap();
 
-        let tool_call_id = acp::ToolCallId::new("failed-location");
+        let location = acp::ToolCallLocation::new(path!("/project/file.txt"));
+        let failed_tool_call_id = acp::ToolCallId::new("failed-location");
+        let rejected_tool_call_id = acp::ToolCallId::new("rejected-location");
+        let canceled_tool_call_id = acp::ToolCallId::new("canceled-location");
+        let metadata_calls = fs.metadata_call_count();
         thread
             .update(cx, |thread, cx| {
                 thread.handle_session_update(
                     acp::SessionUpdate::ToolCall(
-                        acp::ToolCall::new(tool_call_id.clone(), "Failed tool")
-                            .status(acp::ToolCallStatus::Failed)
-                            .locations(vec![acp::ToolCallLocation::new(path!(
-                                "/project/file.txt"
-                            ))]),
+                        acp::ToolCall::new(failed_tool_call_id.clone(), "Failed tool")
+                            .status(acp::ToolCallStatus::InProgress)
+                            .locations(vec![location.clone()]),
                     ),
                     cx,
-                )
+                )?;
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        failed_tool_call_id.clone(),
+                        acp::ToolCallUpdateFields::new().status(acp::ToolCallStatus::Failed),
+                    )),
+                    cx,
+                )?;
+                for (id, status) in [
+                    (rejected_tool_call_id.clone(), ToolCallStatus::Rejected),
+                    (canceled_tool_call_id.clone(), ToolCallStatus::Canceled),
+                ] {
+                    thread.upsert_tool_call_inner(
+                        acp::ToolCall::new(id, "Terminal tool")
+                            .status(acp::ToolCallStatus::InProgress)
+                            .locations(vec![location.clone()])
+                            .into(),
+                        status,
+                        cx,
+                    )?;
+                }
+                Ok::<_, acp::Error>(())
             })
             .unwrap();
         cx.run_until_parked();
 
         thread.read_with(cx, |thread, _| {
-            let (_, tool_call) = thread.tool_call(&tool_call_id).unwrap();
-            assert_eq!(tool_call.location_resolution_attempts, 0);
-            assert!(tool_call.resolved_locations.is_empty());
+            for id in [
+                &failed_tool_call_id,
+                &rejected_tool_call_id,
+                &canceled_tool_call_id,
+            ] {
+                let (_, tool_call) = thread.tool_call(id).unwrap();
+                assert_eq!(tool_call.location_resolution_attempts, 0);
+                assert_eq!(tool_call.location_open_attempts.load(Ordering::SeqCst), 0);
+                assert!(tool_call.resolved_locations.is_empty());
+            }
         });
+        assert_eq!(fs.metadata_call_count(), metadata_calls);
+    }
+
+    #[gpui::test]
+    async fn test_historical_tool_call_invalid_locations_do_not_open_buffers(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "directory": {} }))
+            .await;
+        fs.insert_file(
+            path!("/project/binary.dat"),
+            b"\0\x01\x02\x03binary".to_vec(),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [Path::new(path!("/project"))], cx).await;
+        let worktree_count = project.read_with(cx, |project, cx| project.worktrees(cx).count());
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new(path!("/project"))]),
+                    cx,
+                )
+            })
+            .await
+            .unwrap();
+
+        let locations = [
+            (
+                acp::ToolCallId::new("deleted-external-location"),
+                acp::ToolCallLocation::new(path!("/tmp/deleted-worktree/file.rs")),
+            ),
+            (
+                acp::ToolCallId::new("directory-location"),
+                acp::ToolCallLocation::new(path!("/project/directory")),
+            ),
+            (
+                acp::ToolCallId::new("binary-location"),
+                acp::ToolCallLocation::new(path!("/project/binary.dat")),
+            ),
+        ];
+        let metadata_calls = fs.metadata_call_count();
+        thread
+            .update(cx, |thread, cx| {
+                for (id, location) in &locations {
+                    thread.handle_session_update(
+                        acp::SessionUpdate::ToolCall(
+                            acp::ToolCall::new(id.clone(), "Historical tool call")
+                                .status(acp::ToolCallStatus::Completed)
+                                .locations(vec![location.clone()]),
+                        ),
+                        cx,
+                    )?;
+                    thread.handle_session_update(
+                        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                            id.clone(),
+                            acp::ToolCallUpdateFields::new()
+                                .locations(vec![location.clone()])
+                                .status(acp::ToolCallStatus::Completed),
+                        )),
+                        cx,
+                    )?;
+                }
+                Ok::<_, acp::Error>(())
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        thread.read_with(cx, |thread, _| {
+            for (id, _) in &locations {
+                let (_, tool_call) = thread.tool_call(id).unwrap();
+                assert_eq!(tool_call.location_resolution_attempts, 1);
+                assert_eq!(tool_call.location_open_attempts.load(Ordering::SeqCst), 0);
+                assert_eq!(tool_call.resolved_locations, vec![None]);
+            }
+        });
+        assert_eq!(fs.metadata_call_count() - metadata_calls, locations.len());
+        assert_eq!(
+            project.read_with(cx, |project, cx| project.worktrees(cx).count()),
+            worktree_count
+        );
     }
 
     #[gpui::test]
@@ -6562,6 +6727,7 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             let (_, tool_call) = thread.tool_call(&tool_call_id).unwrap();
             assert_eq!(tool_call.location_resolution_attempts, 1);
+            assert_eq!(tool_call.location_open_attempts.load(Ordering::SeqCst), 1);
             assert!(tool_call.resolved_locations[0].is_some());
         });
     }
@@ -6632,6 +6798,7 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             let (_, tool_call) = thread.tool_call(&tool_call_id).unwrap();
             assert_eq!(tool_call.location_resolution_attempts, 3);
+            assert_eq!(tool_call.location_open_attempts.load(Ordering::SeqCst), 3);
             assert_eq!(
                 tool_call.location_resolution_completed_generation,
                 Some(tool_call.location_resolution_generation)
@@ -6694,6 +6861,7 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             let (_, tool_call) = thread.tool_call(&tool_call_id).unwrap();
             assert_eq!(tool_call.location_resolution_attempts, 1);
+            assert_eq!(tool_call.location_open_attempts.load(Ordering::SeqCst), 0);
             assert_eq!(tool_call.resolved_locations, vec![None]);
         });
     }
@@ -6749,6 +6917,7 @@ mod tests {
         thread.read_with(cx, |thread, _| {
             let (_, tool_call) = thread.tool_call(&tool_call_id).unwrap();
             assert_eq!(tool_call.location_resolution_attempts, 2);
+            assert_eq!(tool_call.location_open_attempts.load(Ordering::SeqCst), 1);
             assert_eq!(tool_call.locations, vec![changed_location]);
             assert!(tool_call.resolved_locations[0].is_some());
         });
@@ -6795,6 +6964,7 @@ mod tests {
                 panic!("expected tool call");
             };
             assert_eq!(tool_call.location_resolution_attempts, 1);
+            assert_eq!(tool_call.location_open_attempts.load(Ordering::SeqCst), 1);
             let (tool_call_location, agent_location) = thread.entries[0]
                 .location(0)
                 .expect("external tool-call location should resolve");
