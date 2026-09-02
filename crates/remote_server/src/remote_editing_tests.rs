@@ -197,6 +197,41 @@ async fn test_basic_remote_editing(cx: &mut TestAppContext, server_cx: &mut Test
     });
 }
 
+#[gpui::test(iterations = 20)]
+async fn test_open_remote_buffer_immediately_after_adding_worktree(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project": {
+                "README.md": "# project",
+            },
+        }),
+    )
+    .await;
+
+    let (project, _headless) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project"), false, cx)
+        })
+        .await
+        .unwrap();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_buffer((worktree_id, rel_path("README.md")), cx)
+        })
+        .await
+        .unwrap();
+
+    buffer.read_with(cx, |buffer, _| assert_eq!(buffer.text(), "# project"));
+}
+
 #[gpui::test]
 async fn test_remote_telemetry_event_forwarding(
     cx: &mut TestAppContext,
