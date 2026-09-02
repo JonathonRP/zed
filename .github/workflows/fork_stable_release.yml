@@ -1,0 +1,164 @@
+name: Fork stable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish the completed packages as a GitHub Release
+        type: boolean
+        default: true
+  pull_request:
+    branches:
+      - release/acp-replay-stable
+  push:
+    branches:
+      - release/acp-replay-stable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  package_windows:
+    name: Package unsigned Windows stable
+    runs-on: ${{ vars.ZED_WINDOWS_RUNNER || 'windows-2022' }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Select stable channel
+        shell: pwsh
+        run: '"stable" | Set-Content -NoNewline crates/zed/RELEASE_CHANNEL'
+
+      - name: Build unsigned installer and portable bundle
+        shell: pwsh
+        env:
+          CARGO_BUILD_JOBS: "1"
+          ZED_CLIENT_CHECKSUM_SEED: fork-unsigned-stable
+        run: |
+          script/bundle-windows.ps1 `
+            -Architecture x86_64 `
+            -ZedFeatures remote/build-remote-server-binary
+          Compress-Archive `
+            -Path inno/x86_64/* `
+            -DestinationPath target/zed-windows-x86_64-portable.zip `
+            -CompressionLevel Optimal `
+            -Force
+
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: windows-x86_64
+          path: |
+            target/Zed-x86_64.exe
+            target/zed-windows-x86_64-portable.zip
+            target/zed-remote-server-windows-x86_64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  package_linux_remote_server:
+    name: Package Linux musl remote server
+    runs-on: ${{ vars.ZED_LINUX_RUNNER || 'ubuntu-22.04' }}
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build remote server
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          RELEASE_CHANNEL: stable
+          RUSTFLAGS: -C target-feature=+crt-static
+          ZED_RELEASE_CHANNEL: stable
+        run: |
+          printf stable > crates/zed/RELEASE_CHANNEL
+          export RELEASE_VERSION="$(script/get-crate-version zed)"
+          cargo --config .cargo/bundle-config.toml build \
+            --release \
+            --package remote_server \
+            --target x86_64-unknown-linux-musl
+          gzip --best --stdout \
+            target/x86_64-unknown-linux-musl/release/remote_server \
+            > target/zed-remote-server-linux-x86_64.gz
+
+      - name: Upload Linux remote server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: linux-remote-server-x86_64
+          path: target/zed-remote-server-linux-x86_64.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  assemble:
+    name: Assemble release assets
+    needs:
+      - package_windows
+      - package_linux_remote_server
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: "*-x86_64"
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA-256 manifest
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fork-stable-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish GitHub Release
+    needs: assemble
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: fork-stable-${{ github.sha }}
+          path: dist
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="acp-replay-${GITHUB_SHA::7}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "ACP replay stable ${GITHUB_SHA::7}" \
+              --notes "Unsigned stable-channel Windows package and matching Linux musl remote server built from ${GITHUB_SHA}."
+          fi
