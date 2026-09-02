@@ -285,6 +285,7 @@ impl VsCodeSettings {
             code_lens: None,
             jupyter: None,
             lsp_document_colors: None,
+            lsp_document_color_inlay_shape: None,
             lsp_document_links: self.read_bool("editor.links"),
             lsp_highlight_debounce: None,
             middle_click_paste: None,
