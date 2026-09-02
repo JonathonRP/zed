@@ -90,10 +90,10 @@ use gpui::{
     Task, TaskExt, WeakEntity, Window,
 };
 use language::{
-    Buffer, BufferEditSource, BufferEvent, Capability, CodeLabel, CursorShape, DiskState, Language,
-    LanguageName, LanguageRegistry, PointUtf16, ToOffset, ToPointUtf16, Toolchain,
-    ToolchainMetadata, ToolchainScope, Transaction, Unclipped, language_settings::InlayHintKind,
-    proto::split_operations,
+    Buffer, BufferEditSource, BufferEvent, ByteContent, Capability, CodeLabel, CursorShape,
+    DiskState, FILE_ANALYSIS_BYTES, Language, LanguageName, LanguageRegistry, PointUtf16, ToOffset,
+    ToPointUtf16, Toolchain, ToolchainMetadata, ToolchainScope, Transaction, Unclipped,
+    analyze_byte_content, language_settings::InlayHintKind, proto::split_operations,
 };
 use lsp::{
     CodeActionKind, CompletionContext, CompletionItemKind, DocumentHighlightKind, InsertTextMode,
@@ -126,6 +126,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     future::Future,
+    io::Read as _,
     ops::{Not as _, Range},
     path::{Path, PathBuf},
     pin::pin,
@@ -4942,6 +4943,63 @@ impl Project {
         })
     }
 
+    pub fn resolve_abs_text_file_path(
+        &self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Option<ResolvedPath>> {
+        if self.is_local() {
+            let expanded = PathBuf::from(shellexpand::tilde(path).into_owned());
+            let fs = self.fs.clone();
+            cx.background_spawn(async move {
+                let metadata = fs.metadata(&expanded).await.ok().flatten()?;
+                if metadata.is_dir {
+                    return None;
+                }
+
+                let mut file = fs.open_sync(&expanded).await.ok()?;
+                let mut header = [0; FILE_ANALYSIS_BYTES];
+                let len = file.read(&mut header).ok()?;
+                if analyze_byte_content(&header[..len]) == ByteContent::Binary {
+                    return None;
+                }
+
+                Some(ResolvedPath::AbsPath {
+                    path: expanded.to_string_lossy().into_owned(),
+                    is_dir: false,
+                })
+            })
+        } else if let Some(ssh_client) = self.remote_client.as_ref() {
+            let request = ssh_client
+                .read(cx)
+                .proto_client()
+                .request(proto::GetPathMetadata {
+                    project_id: REMOTE_SERVER_PROJECT_ID,
+                    path: path.into(),
+                    check_binary: true,
+                });
+            cx.background_spawn(async move {
+                let response = match request.await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        log::debug!("failed to preflight ACP tool call location: {error:#}");
+                        return None;
+                    }
+                };
+                if !response.exists || response.is_dir || response.is_binary {
+                    return None;
+                }
+
+                Some(ResolvedPath::AbsPath {
+                    path: response.path,
+                    is_dir: false,
+                })
+            })
+        } else {
+            Task::ready(None)
+        }
+    }
+
     pub fn resolve_abs_path(&self, path: &str, cx: &App) -> Task<Option<ResolvedPath>> {
         if self.is_local() {
             let expanded = PathBuf::from(shellexpand::tilde(&path).into_owned());
@@ -4961,6 +5019,7 @@ impl Project {
                 .request(proto::GetPathMetadata {
                     project_id: REMOTE_SERVER_PROJECT_ID,
                     path: path.into(),
+                    check_binary: false,
                 });
             cx.background_spawn(async move {
                 let response = request.await.log_err()?;
