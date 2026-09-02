@@ -3,7 +3,8 @@ Param(
     [Parameter()][Alias('i')][switch]$Install,
     [Parameter()][Alias('h')][switch]$Help,
     [Parameter()][Alias('a')][string]$Architecture,
-    [Parameter()][string]$Name
+    [Parameter()][string]$Name,
+    [Parameter()][string[]]$ZedFeatures
 )
 
 . "$PSScriptRoot/lib/workspace.ps1"
@@ -40,10 +41,6 @@ function Get-VSArch {
     }
 }
 
-Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
-Pop-Location
-
 $target = "$Architecture-pc-windows-msvc"
 
 if ($Help) {
@@ -52,9 +49,37 @@ if ($Help) {
     Write-Output "Options:"
     Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)"
     Write-Output "  -Install, -i      Run the installer after building."
+    Write-Output "  -ZedFeatures      Additional Cargo features to enable for the Zed build."
     Write-Output "  -Help, -h         Show this help message."
     exit 0
 }
+
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$vsDevShell = if (Test-Path $vswhere) {
+    & $vswhere `
+        -latest `
+        -products * `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -find Common7\Tools\Launch-VsDevShell.ps1 |
+        Select-Object -First 1
+}
+
+if (-not $vsDevShell) {
+    $vsDevShell = @(
+        "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1",
+        "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Launch-VsDevShell.ps1",
+        "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\Launch-VsDevShell.ps1",
+        "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Launch-VsDevShell.ps1"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
+if (-not $vsDevShell) {
+    throw "Could not find a Visual Studio developer shell with the C++ toolchain"
+}
+
+Push-Location
+& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+Pop-Location
 
 Push-Location -Path crates/zed
 $channel = Get-Content "RELEASE_CHANNEL"
@@ -116,7 +141,19 @@ function GenerateLicenses {
 function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
     # Build zed.exe, cli.exe and auto_update_helper.exe
-    cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
+    $zedBuildArgs = @(
+        '--config', '.cargo/bundle-config.toml',
+        'build',
+        '--release',
+        '--package', 'zed',
+        '--package', 'cli',
+        '--package', 'auto_update_helper',
+        '--target', $target
+    )
+    if ($ZedFeatures) {
+        $zedBuildArgs += @('--features', ($ZedFeatures -join ','))
+    }
+    cargo @zedBuildArgs
     Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
