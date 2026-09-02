@@ -52,12 +52,14 @@ message RemoveWorktree {
 message GetPathMetadata {
   uint64 project_id = 1;
   string path = 2;
+  bool check_binary = 3;
 }
 
 message GetPathMetadataResponse {
   bool exists = 1;
   string path = 2;
   bool is_dir = 3;
+  bool is_binary = 4;
 }
 
 message WorktreeMetadata {

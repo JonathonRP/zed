@@ -11,7 +11,10 @@ use extension_host::headless_host::HeadlessExtensionStore;
 use fs::Fs;
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, PromptLevel, TaskExt};
 use http_client::HttpClient;
-use language::{Buffer, BufferEvent, LanguageRegistry, proto::serialize_operation};
+use language::{
+    Buffer, BufferEvent, ByteContent, FILE_ANALYSIS_BYTES, LanguageRegistry, analyze_byte_content,
+    proto::serialize_operation,
+};
 use node_runtime::NodeRuntime;
 use project::{
     AgentRegistryStore, LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment,
@@ -37,6 +40,7 @@ use smol::process::Child;
 
 use settings::initial_server_settings_content;
 use std::{
+    io::Read as _,
     num::NonZeroU64,
     path::{Path, PathBuf},
     sync::{
@@ -1193,10 +1197,37 @@ impl HeadlessProject {
 
         let metadata = fs.metadata(&expanded).await?;
         let is_dir = metadata.map(|metadata| metadata.is_dir).unwrap_or(false);
+        let is_binary = if envelope.payload.check_binary && metadata.is_some() && !is_dir {
+            match fs.open_sync(&expanded).await {
+                Ok(mut file) => {
+                    let mut header = [0; FILE_ANALYSIS_BYTES];
+                    match file.read(&mut header) {
+                        Ok(len) => analyze_byte_content(&header[..len]) == ByteContent::Binary,
+                        Err(error) => {
+                            log::debug!(
+                                "failed to inspect path metadata for {}: {error:#}",
+                                expanded.display()
+                            );
+                            true
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::debug!(
+                        "failed to inspect path metadata for {}: {error:#}",
+                        expanded.display()
+                    );
+                    true
+                }
+            }
+        } else {
+            false
+        };
 
         Ok(proto::GetPathMetadataResponse {
             exists: metadata.is_some(),
             is_dir,
+            is_binary,
             path: expanded.to_string_lossy().into_owned(),
         })
     }
