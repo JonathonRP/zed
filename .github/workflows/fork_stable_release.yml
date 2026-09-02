@@ -1,4 +1,4 @@
-name: Fork stable release
+name: RP fork stable release
 
 on:
   workflow_dispatch:
@@ -9,10 +9,10 @@ on:
         default: true
   pull_request:
     branches:
-      - release/acp-replay-stable
+      - release/rp-stable
   push:
     branches:
-      - release/acp-replay-stable
+      - release/rp-stable
 
 permissions:
   contents: read
@@ -169,8 +169,9 @@ jobs:
     name: Publish GitHub Release
     needs: assemble
     if: >-
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+      github.repository == 'JonathonRP/zed' &&
+      (github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_release))
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -185,7 +186,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="acp-replay-${GITHUB_SHA::7}"
+          tag="rp-stable-${GITHUB_SHA::7}"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* \
               --clobber \
@@ -194,6 +195,6 @@ jobs:
             gh release create "$tag" dist/* \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "ACP replay stable ${GITHUB_SHA::7}" \
+              --title "RP fork stable ${GITHUB_SHA::7}" \
               --notes "Unsigned stable-channel Windows package and matching Linux musl remote server built from ${GITHUB_SHA}."
           fi
