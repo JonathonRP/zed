@@ -134,6 +134,50 @@ impl AppVersion {
     }
 }
 
+/// Additive release identity for RP fork builds.
+///
+/// These values are absent from ordinary Zed builds, whose version and update
+/// behavior remain unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RpReleaseMetadata {
+    /// Independent UTC calendar version in `YYYYMMDD.patch` form.
+    pub calendar_version: &'static str,
+    /// Git tag that identifies this release.
+    pub release_tag: &'static str,
+    /// Curated Markdown embedded in the packaged application.
+    pub release_notes: &'static str,
+    /// SHA-256 identity of `release_notes`.
+    pub notes_identity: &'static str,
+    /// Build-time release manifest as JSON.
+    pub manifest: &'static str,
+}
+
+/// Returns RP fork metadata when every compile-time value is present.
+pub fn rp_release_metadata() -> Option<RpReleaseMetadata> {
+    match (
+        option_env!("ZED_RP_RELEASE_VERSION"),
+        option_env!("ZED_RP_RELEASE_TAG"),
+        option_env!("ZED_RP_RELEASE_NOTES"),
+        option_env!("ZED_RP_RELEASE_NOTES_IDENTITY"),
+        option_env!("ZED_RP_RELEASE_MANIFEST"),
+    ) {
+        (
+            Some(calendar_version),
+            Some(release_tag),
+            Some(release_notes),
+            Some(notes_identity),
+            Some(manifest),
+        ) => Some(RpReleaseMetadata {
+            calendar_version,
+            release_tag,
+            release_notes,
+            notes_identity,
+            manifest,
+        }),
+        _ => None,
+    }
+}
+
 /// A Zed release channel.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum ReleaseChannel {
