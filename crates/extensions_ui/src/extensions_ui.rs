@@ -397,6 +397,14 @@ pub struct ExtensionsPage {
 }
 
 impl ExtensionsPage {
+    fn title() -> &'static str {
+        if release_channel::rp_release_metadata().is_some() {
+            "RP Extensions"
+        } else {
+            "Extensions"
+        }
+    }
+
     pub fn new(
         workspace: &Workspace,
         provides_filter: Option<ExtensionProvides>,
@@ -1397,7 +1405,7 @@ impl Render for ExtensionsPage {
                             .w_full()
                             .gap_1p5()
                             .justify_between()
-                            .child(Headline::new("Extensions").size(HeadlineSize::Large))
+                            .child(Headline::new(Self::title()).size(HeadlineSize::Large))
                             .child(
                                 Button::new("install-dev-extension", "Install Dev Extension")
                                     .style(ButtonStyle::Outlined)
@@ -1545,7 +1553,7 @@ impl Item for ExtensionsPage {
     type Event = ItemEvent;
 
     fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
-        "Extensions".into()
+        Self::title().into()
     }
 
     fn telemetry_event_text(&self) -> Option<&'static str> {

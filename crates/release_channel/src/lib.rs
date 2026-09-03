@@ -190,6 +190,36 @@ pub fn rp_release_metadata() -> Option<RpReleaseMetadata> {
     }
 }
 
+/// Formats the public release identity without prerelease or build metadata.
+pub fn release_display_identity(
+    rp_release: Option<RpReleaseMetadata>,
+    release_channel: ReleaseChannel,
+    version: &Version,
+) -> String {
+    let mut version = version.clone();
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    rp_release
+        .map(|release| {
+            format!(
+                "Unsigned RP Stable {} (Zed {})",
+                release.calendar_version, version
+            )
+        })
+        .unwrap_or_else(|| format!("{} {}", release_channel.display_name(), version))
+}
+
+/// Formats the embedded RP release-notes tab title with both release identities.
+pub fn rp_release_notes_title(release: RpReleaseMetadata, version: &Version) -> String {
+    let mut version = version.clone();
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    format!(
+        "RP Fork Release Notes {} (Zed {})",
+        release.calendar_version, version
+    )
+}
+
 /// A Zed release channel.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum ReleaseChannel {
@@ -338,7 +368,19 @@ impl FromStr for ReleaseChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::{RP_APP_IDENTIFIER, ReleaseChannel, app_identifier_for};
+    use super::{
+        RP_APP_IDENTIFIER, ReleaseChannel, RpReleaseMetadata, app_identifier_for,
+        release_display_identity, rp_release_notes_title,
+    };
+    use semver::Version;
+
+    const RP_RELEASE: RpReleaseMetadata = RpReleaseMetadata {
+        calendar_version: "20260902.1",
+        release_tag: "rp-stable-20260902.1",
+        release_notes: "# Notes",
+        notes_identity: "sha256:notes",
+        manifest: "{}",
+    };
 
     #[test]
     fn rp_windows_identity_does_not_overlap_official_channels() {
@@ -351,6 +393,28 @@ mod tests {
                 "complete RP metadata must select the fork identity"
             );
         }
+    }
+
+    #[test]
+    fn release_titles_show_both_rp_and_upstream_identity() {
+        let version = Version::parse("1.17.2-preview.3+stable.sha").unwrap();
+        assert_eq!(
+            release_display_identity(Some(RP_RELEASE), ReleaseChannel::Stable, &version),
+            "Unsigned RP Stable 20260902.1 (Zed 1.17.2)"
+        );
+        assert_eq!(
+            rp_release_notes_title(RP_RELEASE, &version),
+            "RP Fork Release Notes 20260902.1 (Zed 1.17.2)"
+        );
+    }
+
+    #[test]
+    fn official_release_identity_keeps_upstream_fallback() {
+        let version = Version::parse("1.17.2-preview.3+stable.sha").unwrap();
+        assert_eq!(
+            release_display_identity(None, ReleaseChannel::Preview, &version),
+            "Zed Preview 1.17.2"
+        );
     }
 
     #[test]
