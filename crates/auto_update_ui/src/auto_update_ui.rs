@@ -327,6 +327,7 @@ fn open_rp_release_notes(
         .app_state()
         .languages
         .language_for_name("Markdown");
+    let title = release_channel::rp_release_notes_title(rp_release, &AppVersion::global(cx));
 
     cx.spawn(async move |workspace, cx| {
         let cleanup_cx = cx.clone();
@@ -352,7 +353,6 @@ fn open_rp_release_notes(
                 buffer.edit([(0..0, rp_release.release_notes)], None, cx)
             });
 
-            let title = format!("RP Fork Release Notes {}", rp_release.calendar_version);
             let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title));
 
             let ws_handle = workspace.clone();
@@ -570,14 +570,11 @@ fn show_update_notification(cx: &mut App) {
     let mut version = updater.read(cx).current_version();
     version.pre = semver::Prerelease::EMPTY;
     version.build = semver::BuildMetadata::EMPTY;
-    let update_identity = rp_release_metadata()
-        .map(|release| {
-            format!(
-                "Unsigned RP Stable {} (Zed {})",
-                release.calendar_version, version
-            )
-        })
-        .unwrap_or_else(|| format!("{} {}", ReleaseChannel::global(cx).display_name(), version));
+    let update_identity = release_channel::release_display_identity(
+        rp_release_metadata(),
+        ReleaseChannel::global(cx),
+        &version,
+    );
 
     if let Some(content) = announcement_for_version(&version, cx) {
         show_app_notification(
