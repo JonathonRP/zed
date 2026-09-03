@@ -97,11 +97,14 @@ jobs:
       - name: Pin sccache wrapper path
         shell: pwsh
         run: |
-          if (-not (Test-Path -LiteralPath $env:SCCACHE_PATH -PathType Leaf)) {
+          $sccachePath = "$env:SCCACHE_PATH.exe"
+          if (-not (Test-Path -LiteralPath $sccachePath -PathType Leaf)) {
             throw "sccache action did not provide a valid SCCACHE_PATH"
           }
-          "RUSTC_WRAPPER=$env:SCCACHE_PATH" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          @(
+            "SCCACHE_PATH=$sccachePath"
+            "RUSTC_WRAPPER=$sccachePath"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Select stable channel
         shell: pwsh
@@ -190,6 +193,11 @@ jobs:
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
 
+      - name: Pin sccache wrapper path
+        run: |
+          test -x "$SCCACHE_PATH"
+          printf 'RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
+
       - name: Install musl toolchain
         run: |
           sudo apt-get update
@@ -206,13 +214,17 @@ jobs:
         run: |
           printf stable > crates/zed/RELEASE_CHANNEL
           export RELEASE_VERSION="$(script/get-crate-version zed)"
+          build_start=$SECONDS
           cargo --config .cargo/bundle-config.toml build \
             --release \
             --package remote_server \
             --target x86_64-unknown-linux-musl
+          echo "RP Linux remote server build elapsed: $((SECONDS - build_start))s"
+          gzip_start=$SECONDS
           gzip --best --stdout \
             target/x86_64-unknown-linux-musl/release/remote_server \
             > "target/zed-rp-stable-${RP_VERSION}-remote-server-linux-x86_64.gz"
+          echo "RP Linux remote server gzip elapsed: $((SECONDS - gzip_start))s"
 
       - name: Show sccache statistics
         if: always()
