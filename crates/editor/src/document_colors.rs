@@ -14,7 +14,8 @@ use util::post_inc;
 
 use crate::{
     DisplayPoint, Editor, EditorSettings, EditorSnapshot, InlaySplice,
-    LSP_REQUEST_DEBOUNCE_TIMEOUT, RangeToAnchorExt, editor_settings::DocumentColorsRenderMode,
+    LSP_REQUEST_DEBOUNCE_TIMEOUT, RangeToAnchorExt,
+    editor_settings::{DocumentColorsRenderMode, LspDocumentColorInlayPosition},
     inlays::Inlay,
 };
 
@@ -22,6 +23,7 @@ use crate::{
 pub(super) struct LspColorData {
     buffer_colors: HashMap<BufferId, BufferColors>,
     render_mode: DocumentColorsRenderMode,
+    inlay_position: LspDocumentColorInlayPosition,
 }
 
 #[derive(Debug, Default)]
@@ -35,7 +37,56 @@ impl LspColorData {
         Self {
             buffer_colors: HashMap::default(),
             render_mode: EditorSettings::get_global(cx).lsp_document_colors,
+            inlay_position: EditorSettings::get_global(cx).lsp_document_color_inlay_position,
         }
+    }
+
+    fn inlay_anchor(range: &Range<Anchor>, position: LspDocumentColorInlayPosition) -> Anchor {
+        match position {
+            LspDocumentColorInlayPosition::Before => range.start,
+            LspDocumentColorInlayPosition::After => range.end,
+        }
+    }
+
+    fn color_inlay(&self, range: &Range<Anchor>, color: &DocumentColor, id: InlayId) -> Inlay {
+        Inlay::color(
+            id.id(),
+            Self::inlay_anchor(range, self.inlay_position),
+            Rgba {
+                r: color.color.red,
+                g: color.color.green,
+                b: color.color.blue,
+                a: color.color.alpha,
+            },
+        )
+    }
+
+    pub fn inlay_position_updated(
+        &mut self,
+        new_inlay_position: LspDocumentColorInlayPosition,
+    ) -> Option<InlaySplice> {
+        if self.inlay_position == new_inlay_position {
+            return None;
+        }
+        self.inlay_position = new_inlay_position;
+
+        if self.render_mode != DocumentColorsRenderMode::Inlay {
+            return None;
+        }
+
+        Some(InlaySplice {
+            to_remove: self
+                .buffer_colors
+                .values()
+                .flat_map(|buffer_colors| buffer_colors.inlay_colors.keys().copied())
+                .collect(),
+            to_insert: self
+                .buffer_colors
+                .values()
+                .flat_map(|buffer_colors| buffer_colors.colors.iter())
+                .map(|(range, color, id)| self.color_inlay(range, color, *id))
+                .collect(),
+        })
     }
 
     pub fn render_mode_updated(
@@ -53,18 +104,7 @@ impl LspColorData {
                     .buffer_colors
                     .values()
                     .flat_map(|buffer_colors| buffer_colors.colors.iter())
-                    .map(|(range, color, id)| {
-                        Inlay::color(
-                            id.id(),
-                            range.start,
-                            Rgba {
-                                r: color.color.red,
-                                g: color.color.green,
-                                b: color.color.blue,
-                                a: color.color.alpha,
-                            },
-                        )
-                    })
+                    .map(|(range, color, id)| self.color_inlay(range, color, *id))
                     .collect(),
             }),
             DocumentColorsRenderMode::None => Some(InlaySplice {
@@ -309,9 +349,14 @@ impl Editor {
                                                         .to_remove
                                                         .push(*existing_inlay_id);
 
+                                                    let inlay_id =
+                                                        post_inc(&mut editor.next_color_inlay_id);
                                                     let inlay = Inlay::color(
-                                                        post_inc(&mut editor.next_color_inlay_id),
-                                                        new_range.start,
+                                                        inlay_id,
+                                                        LspColorData::inlay_anchor(
+                                                            &new_range,
+                                                            colors.inlay_position,
+                                                        ),
                                                         rgba_color,
                                                     );
                                                     let inlay_id = inlay.id;
@@ -323,9 +368,14 @@ impl Editor {
                                                 break;
                                             }
                                             cmp::Ordering::Greater => {
+                                                let inlay_id =
+                                                    post_inc(&mut editor.next_color_inlay_id);
                                                 let inlay = Inlay::color(
-                                                    post_inc(&mut editor.next_color_inlay_id),
-                                                    new_range.start,
+                                                    inlay_id,
+                                                    LspColorData::inlay_anchor(
+                                                        &new_range,
+                                                        colors.inlay_position,
+                                                    ),
                                                     rgba_color,
                                                 );
                                                 let inlay_id = inlay.id;
@@ -337,9 +387,13 @@ impl Editor {
                                         }
                                     }
                                     None => {
+                                        let inlay_id = post_inc(&mut editor.next_color_inlay_id);
                                         let inlay = Inlay::color(
-                                            post_inc(&mut editor.next_color_inlay_id),
-                                            new_range.start,
+                                            inlay_id,
+                                            LspColorData::inlay_anchor(
+                                                &new_range,
+                                                colors.inlay_position,
+                                            ),
                                             rgba_color,
                                         );
                                         let inlay_id = inlay.id;
@@ -391,8 +445,10 @@ mod tests {
     use gpui::{Rgba, TestAppContext};
     use language::FakeLspAdapter;
     use languages::rust_lang;
-    use project::{FakeFs, Project};
+    use multi_buffer::{MultiBufferOffset, ToOffset};
+    use project::{FakeFs, InlayId, Project};
     use serde_json::json;
+    use text::Bias;
     use util::{path, rel_path::rel_path};
     use workspace::{
         CloseActiveItem, MoveItemToPaneInDirection, MultiWorkspace, OpenOptions,
@@ -400,7 +456,10 @@ mod tests {
     };
 
     use crate::{
-        Editor, LSP_REQUEST_DEBOUNCE_TIMEOUT, actions::MoveToEnd, editor_tests::init_test,
+        Editor, LSP_REQUEST_DEBOUNCE_TIMEOUT,
+        actions::MoveToEnd,
+        editor_settings::{LspDocumentColorInlayPosition, LspDocumentColorInlayShape},
+        editor_tests::{init_test, update_test_editor_settings},
     };
 
     fn extract_color_inlays(editor: &Editor, cx: &gpui::App) -> Vec<Rgba> {
@@ -410,6 +469,209 @@ mod tests {
             .filter_map(|inlay| inlay.get_color())
             .map(Rgba::from)
             .collect()
+    }
+
+    fn extract_color_inlay_data(
+        editor: &Editor,
+        cx: &gpui::App,
+    ) -> Vec<(InlayId, MultiBufferOffset, Bias, Rgba)> {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        editor
+            .all_inlays(cx)
+            .into_iter()
+            .filter_map(|inlay| {
+                Some((
+                    inlay.id,
+                    inlay.position.to_offset(&snapshot),
+                    inlay.position.bias(),
+                    Rgba::from(inlay.get_color()?),
+                ))
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    async fn test_document_color_inlay_positions_and_live_updates(cx: &mut TestAppContext) {
+        const TEXT: &str = "color: 😀#abc;\n#111 #222\nrgb(\n1 2\n)\n#000";
+
+        init_test(cx, |_| {});
+        update_test_editor_settings(cx, &|settings| {
+            settings.lsp_document_color_inlay_position =
+                Some(LspDocumentColorInlayPosition::Before);
+            settings.lsp_document_color_inlay_shape = Some(LspDocumentColorInlayShape::Square);
+        });
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/a"), json!({ "colors.rs": TEXT }))
+            .await;
+        let project = Project::test(fs, [path!("/a").as_ref()], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+        let language_registry = project.read_with(cx, |project, _| project.languages().clone());
+        language_registry.add(rust_lang());
+        let mut fake_servers = language_registry.register_fake_lsp(
+            "Rust",
+            FakeLspAdapter {
+                capabilities: lsp::ServerCapabilities {
+                    color_provider: Some(lsp::ColorProviderCapability::Simple(true)),
+                    ..lsp::ServerCapabilities::default()
+                },
+                name: "rust-analyzer",
+                ..FakeLspAdapter::default()
+            },
+        );
+
+        let editor = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_abs_path(
+                    PathBuf::from(path!("/a/colors.rs")),
+                    OpenOptions::default(),
+                    window,
+                    cx,
+                )
+            })
+            .await
+            .unwrap()
+            .downcast::<Editor>()
+            .unwrap();
+        let fake_language_server = fake_servers.next().await.unwrap();
+        let requests_made = Arc::new(AtomicUsize::new(0));
+        let closure_requests_made = Arc::clone(&requests_made);
+        let mut color_request_handle = fake_language_server
+            .set_request_handler::<lsp::request::DocumentColor, _, _>(move |_, _| {
+                let requests_made = Arc::clone(&closure_requests_made);
+                async move {
+                    requests_made.fetch_add(1, atomic::Ordering::Release);
+                    let color = |start_line, start_character, end_line, end_character, red| {
+                        lsp::ColorInformation {
+                            range: lsp::Range {
+                                start: lsp::Position {
+                                    line: start_line,
+                                    character: start_character,
+                                },
+                                end: lsp::Position {
+                                    line: end_line,
+                                    character: end_character,
+                                },
+                            },
+                            color: lsp::Color {
+                                red,
+                                green: 0.0,
+                                blue: 0.0,
+                                alpha: 1.0,
+                            },
+                        }
+                    };
+                    Ok(vec![
+                        color(0, 9, 0, 13, 0.1),
+                        color(1, 0, 1, 4, 0.2),
+                        color(1, 5, 1, 9, 0.3),
+                        color(2, 0, 4, 1, 0.4),
+                        color(3, 2, 3, 2, 0.5),
+                        color(5, 0, 5, 4, 0.6),
+                    ])
+                }
+            });
+
+        cx.executor().advance_clock(LSP_REQUEST_DEBOUNCE_TIMEOUT);
+        color_request_handle.next().await.unwrap();
+        cx.run_until_parked();
+
+        let token_offsets = [
+            TEXT.find("#abc").unwrap(),
+            TEXT.find("#111").unwrap(),
+            TEXT.find("#222").unwrap(),
+            TEXT.find("rgb(").unwrap(),
+            TEXT.find("1 2").unwrap() + 2,
+            TEXT.rfind("#000").unwrap(),
+        ];
+        let token_ends = [
+            token_offsets[0] + "#abc".len(),
+            token_offsets[1] + "#111".len(),
+            token_offsets[2] + "#222".len(),
+            TEXT.rfind(')').unwrap() + 1,
+            token_offsets[4],
+            TEXT.len(),
+        ];
+        let colors = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
+
+        for (position, shape) in [
+            (
+                LspDocumentColorInlayPosition::Before,
+                LspDocumentColorInlayShape::Square,
+            ),
+            (
+                LspDocumentColorInlayPosition::After,
+                LspDocumentColorInlayShape::Square,
+            ),
+            (
+                LspDocumentColorInlayPosition::Before,
+                LspDocumentColorInlayShape::Circle,
+            ),
+            (
+                LspDocumentColorInlayPosition::After,
+                LspDocumentColorInlayShape::Circle,
+            ),
+        ] {
+            update_test_editor_settings(cx, &|settings| {
+                settings.lsp_document_color_inlay_position = Some(position);
+                settings.lsp_document_color_inlay_shape = Some(shape);
+            });
+            cx.run_until_parked();
+
+            editor.update(cx, |editor, cx| {
+                assert_eq!(editor.buffer().read(cx).snapshot(cx).text(), TEXT);
+                let actual = extract_color_inlay_data(editor, cx);
+                assert_eq!(actual.len(), 6);
+                assert_eq!(
+                    actual.iter().map(|(id, _, _, _)| *id).collect::<Vec<_>>(),
+                    match position {
+                        LspDocumentColorInlayPosition::Before => {
+                            (0..6).map(InlayId::Color).collect::<Vec<_>>()
+                        }
+                        LspDocumentColorInlayPosition::After => [0, 1, 2, 4, 3, 5]
+                            .into_iter()
+                            .map(InlayId::Color)
+                            .collect::<Vec<_>>(),
+                    }
+                );
+
+                let expected_offsets = match position {
+                    LspDocumentColorInlayPosition::Before => token_offsets,
+                    LspDocumentColorInlayPosition::After => token_ends,
+                };
+                let expected_bias = match position {
+                    LspDocumentColorInlayPosition::Before => Bias::Left,
+                    LspDocumentColorInlayPosition::After => Bias::Right,
+                };
+
+                for (id, expected_offset, expected_red) in (0..6)
+                    .zip(expected_offsets)
+                    .zip(colors)
+                    .map(|((id, expected_offset), expected_red)| {
+                        (InlayId::Color(id), expected_offset, expected_red)
+                    })
+                {
+                    let (_, offset, bias, color) = actual
+                        .iter()
+                        .find(|(actual_id, _, _, _)| *actual_id == id)
+                        .unwrap();
+                    assert_eq!(*offset, MultiBufferOffset(expected_offset));
+                    assert_eq!(*bias, expected_bias);
+                    assert!((color.r - expected_red).abs() < f32::EPSILON);
+                }
+            });
+
+            cx.executor().advance_clock(LSP_REQUEST_DEBOUNCE_TIMEOUT);
+            cx.run_until_parked();
+            assert_eq!(
+                requests_made.load(atomic::Ordering::Acquire),
+                1,
+                "Changing inlay position or shape must not make another LSP request"
+            );
+        }
     }
 
     #[gpui::test(iterations = 10)]

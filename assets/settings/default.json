@@ -1597,6 +1597,13 @@
   // 4. Draw a background behind the color text..
   //      "lsp_document_colors": "background",
   "lsp_document_colors": "inlay",
+  // Placement of LSP `textDocument/documentColor` inlay swatches.
+  // This setting only applies when `lsp_document_colors` is set to `inlay`.
+  //
+  // Possible values: "before", "after"
+  //
+  // Zed's general default is "before". RP stable ships with "after".
+  "lsp_document_color_inlay_position": "after",
   // Shape of LSP `textDocument/documentColor` inlay swatches.
   // This setting only applies when `lsp_document_colors` is set to `inlay`.
   //

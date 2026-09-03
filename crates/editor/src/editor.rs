@@ -10017,9 +10017,27 @@ impl Editor {
                 self.refresh_outline_symbols_at_cursor(cx);
             }
 
-            if let Some(inlay_splice) = self.colors.as_mut().and_then(|colors| {
-                colors.render_mode_updated(EditorSettings::get_global(cx).lsp_document_colors)
-            }) {
+            let (lsp_document_colors, lsp_document_color_inlay_position) = {
+                let editor_settings = EditorSettings::get_global(cx);
+                (
+                    editor_settings.lsp_document_colors,
+                    editor_settings.lsp_document_color_inlay_position,
+                )
+            };
+            if let Some(inlay_splice) = self
+                .colors
+                .as_mut()
+                .and_then(|colors| colors.inlay_position_updated(lsp_document_color_inlay_position))
+                && !inlay_splice.is_empty()
+            {
+                self.splice_inlays(&inlay_splice.to_remove, inlay_splice.to_insert, cx);
+            }
+
+            if let Some(inlay_splice) = self
+                .colors
+                .as_mut()
+                .and_then(|colors| colors.render_mode_updated(lsp_document_colors))
+            {
                 if !inlay_splice.is_empty() {
                     self.splice_inlays(&inlay_splice.to_remove, inlay_splice.to_insert, cx);
                 }
