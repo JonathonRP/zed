@@ -124,7 +124,10 @@ if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
     if ($probeStats.stats.compile_requests -lt 1 -or $probeStats.stats.requests_executed -lt 1) {
         throw "RP Windows sccache probe did not register a compile request"
     }
+    Write-Host "RP Windows sccache controlled probe statistics:"
     & $requiredRustcWrapper --show-stats
+    & $requiredRustcWrapper --zero-stats
+    Write-Host "RP Windows sccache statistics reset; subsequent counts are release build only"
 }
 
 Push-Location -Path crates/zed
@@ -425,14 +428,14 @@ function BuildInstaller {
         }
 
         $appId = "{{4A5A5F9D-AE49-4238-AD6B-FD55FEF6DA84}"
-        $appName = "Zed-ACP-Patched"
-        $appDisplayName = "Zed-ACP-Patched (Unsigned RP Stable)"
+        $appName = "Zed-RP"
+        $appDisplayName = "Zed-RP (Unsigned RP Stable)"
         # This must match release_channel::app_identifier() plus the runtime mutex suffix.
         $appMutex = "Zed-ACP-Patched-RP-Stable-Instance-Mutex"
         $appExeName = "Zed"
-        $regValueName = "ZedACPPatchedRPStable"
+        $regValueName = "ZedRPStable"
         $appUserId = "Zed-ACP-Patched-RP-Stable"
-        $appShellNameShort = "Zed-ACP-Patched"
+        $appShellNameShort = "Zed-RP"
         $appAppxFullName = ""
     }
 
