@@ -8,10 +8,11 @@ use gpui::{
 };
 use http_client::{HttpClient, HttpClientWithUrl};
 use paths::remote_servers_dir;
-use release_channel::{AppCommitSha, ReleaseChannel};
+use release_channel::{AppCommitSha, ReleaseChannel, RpReleaseMetadata};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use settings::{RegisterSetting, Settings, SettingsStore};
+use sha2::{Digest, Sha256};
 use smol::fs::File;
 use smol::{
     fs,
@@ -47,6 +48,129 @@ impl std::error::Error for MissingDependencyError {}
 const POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const NIGHTLY_POLL_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const REMOTE_SERVER_CACHE_LIMIT: usize = 5;
+const RP_RELEASES_API: &str = "https://api.github.com/repos/JonathonRP/zed/releases?per_page=100";
+const RP_REPOSITORY_RELEASES: &str = "https://github.com/JonathonRP/zed/releases/download";
+const RP_MANIFEST_NAME: &str = "rp-update.json";
+const RP_API_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const RP_MANIFEST_MAX_BYTES: u64 = 256 * 1024;
+const RP_MAX_REDIRECTS: usize = 5;
+const RP_UNSIGNED_TRUST_NOTICE: &str = "RP update artifacts are unsigned; manifest hashes are rooted only in JonathonRP/zed repository controls and HTTPS/TLS, not independent publisher authentication";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateEndpointSource {
+    Official,
+    Rp,
+}
+
+fn update_endpoint_source(metadata: Option<RpReleaseMetadata>) -> UpdateEndpointSource {
+    if metadata.is_some() {
+        UpdateEndpointSource::Rp
+    } else {
+        UpdateEndpointSource::Official
+    }
+}
+
+fn release_discovery_endpoint(source: UpdateEndpointSource) -> &'static str {
+    match source {
+        UpdateEndpointSource::Official => "/releases/{channel}/latest/asset",
+        UpdateEndpointSource::Rp => RP_RELEASES_API,
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpUpdateManifest {
+    schema_version: u32,
+    channel: String,
+    calendar_version: String,
+    upstream_version: String,
+    commit: String,
+    tag: String,
+    trust: RpTrust,
+    notes_identity: String,
+    assets: RpAssets,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpTrust {
+    signed: bool,
+    label: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpAssets {
+    windows_x86_64_installer: RpManifestAsset,
+    windows_x86_64_portable: RpManifestAsset,
+    windows_x86_64_remote_server: RpManifestAsset,
+    linux_x86_64_remote_server: RpManifestAsset,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpManifestAsset {
+    name: String,
+    size: u64,
+    sha256: String,
+    url: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RpCalendarVersion {
+    date: u32,
+    patch: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RpCandidateIdentity {
+    calendar: RpCalendarVersion,
+    calendar_version: String,
+    tag: String,
+    commit: String,
+    upstream_version: Version,
+    installer_sha256: String,
+}
+
+#[derive(Clone, Debug)]
+struct ValidatedRpManifest {
+    manifest: RpUpdateManifest,
+    identity: RpCandidateIdentity,
+}
+
+#[derive(Clone, Debug)]
+struct RpCompileIdentity {
+    calendar: RpCalendarVersion,
+    calendar_version: String,
+    tag: String,
+    commit: String,
+    upstream_version: Version,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RpRequestKind {
+    Api,
+    ReleaseAsset,
+}
+
+enum UpdateDownload {
+    Official(ReleaseAsset),
+    Rp(RpManifestAsset),
+}
 
 #[cfg(target_os = "linux")]
 fn linux_rsync_install_hint() -> &'static str {
@@ -176,6 +300,7 @@ impl AutoUpdateStatus {
 pub struct AutoUpdater {
     status: AutoUpdateStatus,
     current_version: Version,
+    staged_rp_candidate: Option<RpCandidateIdentity>,
     client: Arc<Client>,
     pending_poll: Option<Task<Option<()>>>,
     quit_subscription: Option<gpui::Subscription>,
@@ -372,7 +497,7 @@ struct InstallerDir(tempfile::TempDir);
 
 #[cfg(not(target_os = "windows"))]
 impl InstallerDir {
-    async fn new() -> Result<Self> {
+    async fn new(_rp_root: Option<&Path>) -> Result<Self> {
         Ok(Self(
             tempfile::Builder::new()
                 .prefix(INSTALLER_DIR_PREFIX)
@@ -390,11 +515,15 @@ struct InstallerDir(PathBuf);
 
 #[cfg(target_os = "windows")]
 impl InstallerDir {
-    async fn new() -> Result<Self> {
-        let installer_dir = std::env::current_exe()?
-            .parent()
-            .context("No parent dir for Zed.exe")?
-            .join("updates");
+    async fn new(rp_root: Option<&Path>) -> Result<Self> {
+        let app_root = match rp_root {
+            Some(root) => root.to_owned(),
+            None => std::env::current_exe()?
+                .parent()
+                .context("No parent dir for Zed.exe")?
+                .to_owned(),
+        };
+        let installer_dir = app_root.join("updates");
         if smol::fs::metadata(&installer_dir).await.is_ok() {
             smol::fs::remove_dir_all(&installer_dir).await?;
         }
@@ -417,6 +546,439 @@ impl UpdateCheckType {
     pub fn is_manual(self) -> bool {
         self == Self::Manual
     }
+}
+
+impl RpCalendarVersion {
+    fn parse(value: &str) -> Result<Self> {
+        let (date, patch) = value
+            .split_once('.')
+            .with_context(|| format!("invalid RP calendar version {value:?}"))?;
+        anyhow::ensure!(
+            date.len() == 8 && date.bytes().all(|byte| byte.is_ascii_digit()),
+            "invalid RP calendar date {date:?}"
+        );
+        anyhow::ensure!(
+            !patch.is_empty()
+                && !patch.starts_with('0')
+                && patch.bytes().all(|byte| byte.is_ascii_digit()),
+            "invalid RP calendar patch {patch:?}"
+        );
+
+        let year = date[0..4].parse::<u32>()?;
+        let month = date[4..6].parse::<u32>()?;
+        let day = date[6..8].parse::<u32>()?;
+        let days_in_month = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if year.is_multiple_of(400)
+                || (year.is_multiple_of(4) && !year.is_multiple_of(100)) =>
+            {
+                29
+            }
+            2 => 28,
+            _ => 0,
+        };
+        anyhow::ensure!(
+            year > 0 && day > 0 && day <= days_in_month,
+            "invalid RP calendar date {date:?}"
+        );
+
+        Ok(Self {
+            date: date.parse()?,
+            patch: patch.parse()?,
+        })
+    }
+}
+
+fn parse_rp_tag(tag: &str) -> Result<(RpCalendarVersion, &str)> {
+    let calendar_version = tag
+        .strip_prefix("rp-stable-")
+        .with_context(|| format!("invalid RP release tag {tag:?}"))?;
+    Ok((
+        RpCalendarVersion::parse(calendar_version)?,
+        calendar_version,
+    ))
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn normalized_upstream_version(mut version: Version) -> Version {
+    version.build = semver::BuildMetadata::EMPTY;
+    version
+}
+
+impl RpCompileIdentity {
+    fn new(
+        metadata: RpReleaseMetadata,
+        upstream_version: Version,
+        commit: Option<String>,
+    ) -> Result<Self> {
+        let calendar = RpCalendarVersion::parse(metadata.calendar_version)?;
+        let (tag_calendar, tag_calendar_text) = parse_rp_tag(metadata.release_tag)?;
+        anyhow::ensure!(
+            calendar == tag_calendar && metadata.calendar_version == tag_calendar_text,
+            "compiled RP tag and calendar version do not match"
+        );
+        let commit = commit.context("compiled RP build has no AppCommitSha")?;
+        anyhow::ensure!(
+            is_lower_hex(&commit, 40),
+            "compiled RP AppCommitSha must be a lowercase full SHA"
+        );
+        anyhow::ensure!(
+            metadata.notes_identity.starts_with("sha256:")
+                && is_lower_hex(&metadata.notes_identity["sha256:".len()..], 64),
+            "compiled RP release-notes identity is invalid"
+        );
+        Ok(Self {
+            calendar,
+            calendar_version: metadata.calendar_version.to_string(),
+            tag: metadata.release_tag.to_string(),
+            commit,
+            upstream_version: normalized_upstream_version(upstream_version),
+        })
+    }
+}
+
+fn expected_rp_asset_name(key: &str, calendar_version: &str) -> Result<String> {
+    let prefix = format!("rp-stable-{calendar_version}");
+    match key {
+        "windows_x86_64_installer" => Ok(format!("Zed-{prefix}-windows-x86_64.exe")),
+        "windows_x86_64_portable" => Ok(format!("zed-{prefix}-windows-x86_64-portable.zip")),
+        "windows_x86_64_remote_server" => {
+            Ok(format!("zed-{prefix}-remote-server-windows-x86_64.zip"))
+        }
+        "linux_x86_64_remote_server" => Ok(format!("zed-{prefix}-remote-server-linux-x86_64.gz")),
+        _ => anyhow::bail!("unexpected RP asset key {key:?}"),
+    }
+}
+
+fn expected_rp_asset_url(tag: &str, name: &str) -> String {
+    format!("{RP_REPOSITORY_RELEASES}/{tag}/{name}")
+}
+
+fn validate_rp_manifest(manifest: RpUpdateManifest) -> Result<ValidatedRpManifest> {
+    anyhow::ensure!(
+        manifest.schema_version == 1,
+        "unsupported RP manifest schema"
+    );
+    anyhow::ensure!(
+        manifest.channel == "rp-stable",
+        "RP manifest has an unexpected channel"
+    );
+    let calendar = RpCalendarVersion::parse(&manifest.calendar_version)?;
+    let (tag_calendar, tag_calendar_text) = parse_rp_tag(&manifest.tag)?;
+    anyhow::ensure!(
+        calendar == tag_calendar && manifest.calendar_version == tag_calendar_text,
+        "RP manifest tag and calendar version do not match"
+    );
+    let upstream_version = manifest
+        .upstream_version
+        .parse::<Version>()
+        .context("RP manifest has an invalid upstream semver")?;
+    anyhow::ensure!(
+        is_lower_hex(&manifest.commit, 40),
+        "RP manifest commit must be a lowercase full SHA"
+    );
+    anyhow::ensure!(
+        !manifest.trust.signed && manifest.trust.label == "unsigned",
+        "{RP_UNSIGNED_TRUST_NOTICE}"
+    );
+    anyhow::ensure!(
+        manifest.notes_identity.starts_with("sha256:")
+            && is_lower_hex(&manifest.notes_identity["sha256:".len()..], 64),
+        "RP manifest has an invalid release-notes identity"
+    );
+
+    let assets = [
+        (
+            "windows_x86_64_installer",
+            &manifest.assets.windows_x86_64_installer,
+        ),
+        (
+            "windows_x86_64_portable",
+            &manifest.assets.windows_x86_64_portable,
+        ),
+        (
+            "windows_x86_64_remote_server",
+            &manifest.assets.windows_x86_64_remote_server,
+        ),
+        (
+            "linux_x86_64_remote_server",
+            &manifest.assets.linux_x86_64_remote_server,
+        ),
+    ];
+    let mut names = std::collections::HashSet::new();
+    for (key, asset) in assets {
+        let expected_name = expected_rp_asset_name(key, &manifest.calendar_version)?;
+        anyhow::ensure!(
+            asset.name == expected_name,
+            "RP manifest asset {key} has an unexpected name"
+        );
+        anyhow::ensure!(
+            names.insert(&asset.name),
+            "duplicate RP manifest asset name"
+        );
+        anyhow::ensure!(asset.size > 0, "RP manifest asset {key} is empty");
+        anyhow::ensure!(
+            is_lower_hex(&asset.sha256, 64),
+            "RP manifest asset {key} has an invalid SHA-256"
+        );
+        anyhow::ensure!(
+            asset.url == expected_rp_asset_url(&manifest.tag, &asset.name),
+            "RP manifest asset {key} has an unexpected owner, repository, tag, or URL"
+        );
+    }
+
+    let identity = RpCandidateIdentity {
+        calendar,
+        calendar_version: manifest.calendar_version.clone(),
+        tag: manifest.tag.clone(),
+        commit: manifest.commit.clone(),
+        upstream_version,
+        installer_sha256: manifest.assets.windows_x86_64_installer.sha256.clone(),
+    };
+    Ok(ValidatedRpManifest { manifest, identity })
+}
+
+fn select_newest_rp_release(releases: &[GithubRelease]) -> Result<(&GithubRelease, String)> {
+    let release = releases
+        .iter()
+        .filter(|release| !release.draft && !release.prerelease)
+        .filter_map(|release| {
+            parse_rp_tag(&release.tag_name)
+                .ok()
+                .map(|(version, _)| (version, release))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, release)| release)
+        .context("GitHub returned no valid RP stable calendar release")?;
+    let manifest_assets = release
+        .assets
+        .iter()
+        .filter(|asset| asset.name == RP_MANIFEST_NAME)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        manifest_assets.len() == 1,
+        "newest RP release must contain exactly one {RP_MANIFEST_NAME} asset"
+    );
+    let expected_url = expected_rp_asset_url(&release.tag_name, RP_MANIFEST_NAME);
+    anyhow::ensure!(
+        manifest_assets[0].browser_download_url == expected_url,
+        "RP manifest release asset URL is not the pinned repository URL"
+    );
+    Ok((release, expected_url))
+}
+
+fn is_allowed_rp_redirect(kind: RpRequestKind, url: &http_client::Url) -> bool {
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    match kind {
+        RpRequestKind::Api => host.eq_ignore_ascii_case("api.github.com"),
+        RpRequestKind::ReleaseAsset => [
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "github-releases.githubusercontent.com",
+        ]
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed)),
+    }
+}
+
+fn validate_rp_initial_url(kind: RpRequestKind, url: &str) -> Result<http_client::Url> {
+    let parsed = http_client::Url::parse(url).context("invalid RP request URL")?;
+    anyhow::ensure!(
+        parsed.scheme() == "https"
+            && parsed.username().is_empty()
+            && parsed.password().is_none()
+            && parsed.port().is_none(),
+        "RP requests require an uncredentialed HTTPS URL"
+    );
+    match kind {
+        RpRequestKind::Api => {
+            anyhow::ensure!(
+                url == RP_RELEASES_API,
+                "unexpected RP releases API endpoint"
+            )
+        }
+        RpRequestKind::ReleaseAsset => anyhow::ensure!(
+            parsed.host_str() == Some("github.com")
+                && parsed
+                    .path()
+                    .starts_with("/JonathonRP/zed/releases/download/"),
+            "unexpected RP release asset endpoint"
+        ),
+    }
+    Ok(parsed)
+}
+
+async fn rp_get_response(
+    client: &Arc<HttpClientWithUrl>,
+    initial_url: &str,
+    kind: RpRequestKind,
+) -> Result<http_client::Response<http_client::AsyncBody>> {
+    use http_client::{HttpRequestExt as _, RedirectPolicy};
+
+    let mut url = validate_rp_initial_url(kind, initial_url)?;
+    for redirect_count in 0..=RP_MAX_REDIRECTS {
+        let request = http_client::Request::builder()
+            .method(http_client::Method::GET)
+            .uri(url.as_str())
+            .header(http_client::http::header::ACCEPT_ENCODING, "identity")
+            .follow_redirects(RedirectPolicy::NoFollow)
+            .body(http_client::AsyncBody::default())?;
+        let response = client.send(request).await?;
+        if !matches!(
+            response.status(),
+            http_client::StatusCode::MOVED_PERMANENTLY
+                | http_client::StatusCode::FOUND
+                | http_client::StatusCode::SEE_OTHER
+                | http_client::StatusCode::TEMPORARY_REDIRECT
+                | http_client::StatusCode::PERMANENT_REDIRECT
+        ) {
+            anyhow::ensure!(
+                response.status() == http_client::StatusCode::OK,
+                "RP request failed with status {}",
+                response.status()
+            );
+            return Ok(response);
+        }
+        anyhow::ensure!(
+            redirect_count < RP_MAX_REDIRECTS,
+            "RP request exceeded {RP_MAX_REDIRECTS} redirects"
+        );
+        let location = response
+            .headers()
+            .get(http_client::http::header::LOCATION)
+            .context("RP redirect omitted Location")?
+            .to_str()
+            .context("RP redirect Location is not text")?;
+        let next = url.join(location).context("invalid RP redirect URL")?;
+        anyhow::ensure!(
+            is_allowed_rp_redirect(kind, &next),
+            "RP redirect target is not an allowed GitHub endpoint"
+        );
+        url = next;
+    }
+    unreachable!()
+}
+
+async fn read_rp_response_bounded(
+    response: &mut http_client::Response<http_client::AsyncBody>,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    if let Some(content_length) = response
+        .headers()
+        .get(http_client::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        anyhow::ensure!(content_length <= limit, "RP response exceeds size limit");
+    }
+    let mut body = Vec::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = response.body_mut().read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        anyhow::ensure!(
+            body.len() as u64 + read as u64 <= limit,
+            "RP response exceeds size limit"
+        );
+        body.extend_from_slice(&buffer[..read]);
+    }
+    Ok(body)
+}
+
+async fn fetch_rp_manifest_url(
+    client: &Arc<HttpClientWithUrl>,
+    tag: &str,
+    url: &str,
+) -> Result<ValidatedRpManifest> {
+    anyhow::ensure!(
+        url == expected_rp_asset_url(tag, RP_MANIFEST_NAME),
+        "RP manifest URL does not match its release tag"
+    );
+    let mut response = rp_get_response(client, url, RpRequestKind::ReleaseAsset).await?;
+    let body = read_rp_response_bounded(&mut response, RP_MANIFEST_MAX_BYTES).await?;
+    let manifest: RpUpdateManifest =
+        serde_json::from_slice(&body).context("invalid strict RP update manifest")?;
+    let manifest = validate_rp_manifest(manifest)?;
+    anyhow::ensure!(
+        manifest.identity.tag == tag,
+        "RP manifest tag does not match selected GitHub release"
+    );
+    Ok(manifest)
+}
+
+async fn discover_latest_rp_manifest(
+    client: &Arc<HttpClientWithUrl>,
+) -> Result<ValidatedRpManifest> {
+    let endpoint = release_discovery_endpoint(UpdateEndpointSource::Rp);
+    let mut response = rp_get_response(client, endpoint, RpRequestKind::Api).await?;
+    let body = read_rp_response_bounded(&mut response, RP_API_MAX_BYTES).await?;
+    let releases: Vec<GithubRelease> =
+        serde_json::from_slice(&body).context("invalid GitHub releases API response")?;
+    let (release, manifest_url) = select_newest_rp_release(&releases)?;
+    fetch_rp_manifest_url(client, &release.tag_name, &manifest_url).await
+}
+
+fn newer_rp_candidate(
+    installed: &RpCompileIdentity,
+    staged: Option<&RpCandidateIdentity>,
+    candidate: &RpCandidateIdentity,
+) -> Result<bool> {
+    anyhow::ensure!(
+        candidate.upstream_version >= installed.upstream_version,
+        "RP candidate upstream version would downgrade the installed upstream version"
+    );
+    let minimum_calendar = staged
+        .map(|staged| staged.calendar.max(installed.calendar))
+        .unwrap_or(installed.calendar);
+    if candidate.calendar <= minimum_calendar {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn validate_matching_remote_manifest(
+    installed: &RpCompileIdentity,
+    candidate: &ValidatedRpManifest,
+) -> Result<()> {
+    anyhow::ensure!(
+        candidate.identity.calendar == installed.calendar
+            && candidate.identity.calendar_version == installed.calendar_version
+            && candidate.identity.tag == installed.tag
+            && candidate.identity.commit == installed.commit
+            && candidate.identity.upstream_version == installed.upstream_version,
+        "RP remote-server manifest does not exactly match the running RP build"
+    );
+    Ok(())
+}
+
+fn rp_remote_asset<'a>(
+    manifest: &'a ValidatedRpManifest,
+    os: &str,
+    arch: &str,
+) -> Result<&'a RpManifestAsset> {
+    anyhow::ensure!(
+        os == "linux" && arch == "x86_64",
+        "RP remote server is unsupported for {os}/{arch}; refusing official fallback"
+    );
+    Ok(&manifest.manifest.assets.linux_x86_64_remote_server)
 }
 
 impl AutoUpdater {
@@ -455,6 +1017,7 @@ impl AutoUpdater {
         Self {
             status: AutoUpdateStatus::Idle,
             current_version,
+            staged_rp_candidate: None,
             client,
             pending_poll: None,
             quit_subscription,
@@ -604,6 +1167,56 @@ impl AutoUpdater {
                 .context("auto-update not initialized")
         })?;
 
+        if let Some(metadata) = release_channel::rp_release_metadata() {
+            anyhow::ensure!(
+                release_channel == ReleaseChannel::Stable,
+                "RP metadata may only update the stable channel"
+            );
+            set_status("Fetching matching RP remote server release", cx);
+            let (client, installed_version, commit) = this.read_with(cx, |this, cx| {
+                (
+                    this.client.http_client(),
+                    this.current_version.clone(),
+                    AppCommitSha::try_global(cx).map(|sha| sha.full()),
+                )
+            });
+            let installed = RpCompileIdentity::new(metadata, installed_version, commit)?;
+            if let Some(requested_version) = version {
+                anyhow::ensure!(
+                    normalized_upstream_version(requested_version) == installed.upstream_version,
+                    "requested RP remote server version does not match the running build"
+                );
+            }
+            let manifest_url = expected_rp_asset_url(&installed.tag, RP_MANIFEST_NAME);
+            let manifest = fetch_rp_manifest_url(&client, &installed.tag, &manifest_url).await?;
+            validate_matching_remote_manifest(&installed, &manifest)?;
+            let asset = rp_remote_asset(&manifest, os, arch)?.clone();
+
+            let servers_dir = paths::remote_servers_dir();
+            let channel_dir = servers_dir.join(release_channel.dev_name());
+            let platform_dir = channel_dir.join(format!("{}-{}", os, arch));
+            let version_path = platform_dir.join(format!("{}.gz", installed.upstream_version));
+            smol::fs::create_dir_all(&platform_dir).await.ok();
+
+            let cached_is_valid = verify_rp_file(&version_path, &asset).await.unwrap_or(false);
+            if !cached_is_valid {
+                _ = smol::fs::remove_file(&version_path).await;
+                log::warn!("{RP_UNSIGNED_TRUST_NOTICE}");
+                set_status("Downloading verified RP remote server", cx);
+                download_rp_asset(&version_path, &asset, client, |_| {}).await?;
+            }
+            if let Err(error) =
+                cleanup_remote_server_cache(&platform_dir, &version_path, REMOTE_SERVER_CACHE_LIMIT)
+                    .await
+            {
+                log::warn!(
+                    "Failed to clean up remote server cache in {:?}: {error:#}",
+                    platform_dir
+                );
+            }
+            return Ok(version_path);
+        }
+
         set_status("Fetching remote server release", cx);
         let release = Self::get_release_asset(
             &this,
@@ -653,6 +1266,14 @@ impl AutoUpdater {
         arch: &str,
         cx: &mut AsyncApp,
     ) -> Result<Option<String>> {
+        if release_channel::rp_release_metadata().is_some() {
+            anyhow::ensure!(
+                channel == ReleaseChannel::Stable && os == "linux" && arch == "x86_64",
+                "unsupported RP remote-server request; refusing official fallback"
+            );
+            return Ok(None);
+        }
+
         let this = cx.update(|cx| {
             cx.default_global::<GlobalAutoUpdate>()
                 .0
@@ -731,13 +1352,14 @@ impl AutoUpdater {
     }
 
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
-        let (client, installed_version, previous_status, release_channel) =
+        let (client, installed_version, previous_status, release_channel, staged_rp_candidate) =
             this.read_with(cx, |this, cx| {
                 (
                     this.client.http_client(),
                     this.current_version.clone(),
                     this.status.clone(),
                     ReleaseChannel::try_global(cx).unwrap_or(ReleaseChannel::Stable),
+                    this.staged_rp_candidate.clone(),
                 )
             });
 
@@ -749,17 +1371,59 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let fetched_release_data =
-            Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx).await?;
-        let fetched_version = fetched_release_data.clone().version;
-        let app_commit_sha = Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
-        let newer_version = Self::check_if_fetched_version_is_newer(
-            release_channel,
-            app_commit_sha,
-            installed_version,
-            fetched_version,
-            previous_status.clone(),
-        )?;
+        let rp_metadata = release_channel::rp_release_metadata();
+        let (newer_version, download, rp_candidate_to_cache) =
+            if update_endpoint_source(rp_metadata) == UpdateEndpointSource::Rp {
+                anyhow::ensure!(
+                    release_channel == ReleaseChannel::Stable,
+                    "RP metadata may only update the stable channel"
+                );
+                anyhow::ensure!(
+                    OS == "windows" && ARCH == "x86_64",
+                    "RP app updater is unsupported for {OS}/{ARCH}; refusing official fallback"
+                );
+                let metadata = rp_metadata.expect("source checked above");
+                let installed_commit =
+                    cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full()));
+                let installed =
+                    RpCompileIdentity::new(metadata, installed_version.clone(), installed_commit)?;
+                log::warn!("{RP_UNSIGNED_TRUST_NOTICE}");
+                let candidate = discover_latest_rp_manifest(&client).await?;
+                if !newer_rp_candidate(
+                    &installed,
+                    staged_rp_candidate.as_ref(),
+                    &candidate.identity,
+                )? {
+                    (None, None, None)
+                } else {
+                    (
+                        Some(candidate.identity.upstream_version.clone()),
+                        Some(UpdateDownload::Rp(
+                            candidate.manifest.assets.windows_x86_64_installer.clone(),
+                        )),
+                        Some(candidate.identity),
+                    )
+                }
+            } else {
+                let fetched_release_data =
+                    Self::get_release_asset(&this, release_channel, None, "zed", OS, ARCH, cx)
+                        .await?;
+                let fetched_version = fetched_release_data.clone().version;
+                let app_commit_sha =
+                    Ok(cx.update(|cx| AppCommitSha::try_global(cx).map(|sha| sha.full())));
+                let newer_version = Self::check_if_fetched_version_is_newer(
+                    release_channel,
+                    app_commit_sha,
+                    installed_version,
+                    fetched_version,
+                    previous_status.clone(),
+                )?;
+                (
+                    newer_version,
+                    Some(UpdateDownload::Official(fetched_release_data)),
+                    None,
+                )
+            };
 
         let Some(newer_version) = newer_version else {
             this.update(cx, |this, cx| {
@@ -781,30 +1445,52 @@ impl AutoUpdater {
             cx.notify();
         });
 
-        let installer_dir = InstallerDir::new()
+        let rp_installer_asset = match download.as_ref() {
+            Some(UpdateDownload::Rp(asset)) => Some(asset.clone()),
+            _ => None,
+        };
+        let rp_staging_root: Option<PathBuf> = {
+            #[cfg(target_os = "windows")]
+            {
+                if rp_installer_asset.is_some() {
+                    let running_app_path = cx.update(|cx| cx.app_path())?;
+                    let metadata = rp_metadata.context("RP download has no compile metadata")?;
+                    Some(verify_rp_windows_running_install(&running_app_path, metadata)?.0)
+                } else {
+                    None
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                None
+            }
+        };
+        let installer_dir = InstallerDir::new(rp_staging_root.as_deref())
             .await
             .context("Failed to create installer dir")?;
         let target_path = Self::target_path(&installer_dir).await?;
         let progress_entity = this.clone();
         let mut progress_cx = cx.clone();
-        download_release(
-            &target_path,
-            fetched_release_data,
-            client,
-            move |progress| {
-                progress_entity.update(&mut progress_cx, |this, cx| {
-                    if let AutoUpdateStatus::Downloading {
-                        progress: current_progress,
-                        ..
-                    } = &mut this.status
-                    {
-                        *current_progress = progress;
-                        cx.notify();
-                    }
-                });
-            },
-        )
-        .await
+        let mut on_progress = move |progress| {
+            progress_entity.update(&mut progress_cx, |this, cx| {
+                if let AutoUpdateStatus::Downloading {
+                    progress: current_progress,
+                    ..
+                } = &mut this.status
+                {
+                    *current_progress = progress;
+                    cx.notify();
+                }
+            });
+        };
+        match download.context("newer update has no download")? {
+            UpdateDownload::Official(release) => {
+                download_release(&target_path, release, client, on_progress).await
+            }
+            UpdateDownload::Rp(asset) => {
+                download_rp_asset(&target_path, &asset, client, &mut on_progress).await
+            }
+        }
         .with_context(|| format!("Failed to download update to {}", target_path.display()))?;
 
         this.update(cx, |this, cx| {
@@ -834,6 +1520,7 @@ impl AutoUpdater {
                 running_app_path,
                 channel,
                 background_executor,
+                rp_installer_asset,
             ))
             .await
         };
@@ -846,6 +1533,9 @@ impl AutoUpdater {
         this.update(cx, |this, cx| {
             this.set_should_show_update_notification(true, cx)
                 .detach_and_log_err(cx);
+            if let Some(candidate) = rp_candidate_to_cache {
+                this.staged_rp_candidate = Some(candidate);
+            }
             this.status = AutoUpdateStatus::Updated {
                 version: newer_version,
             };
@@ -927,6 +1617,7 @@ impl AutoUpdater {
         running_app_path: PathBuf,
         channel: &str,
         background_executor: BackgroundExecutor,
+        rp_installer_asset: Option<RpManifestAsset>,
     ) -> Result<Option<PathBuf>> {
         match OS {
             "macos" => {
@@ -941,7 +1632,9 @@ impl AutoUpdater {
             "linux" => {
                 install_release_linux(&installer_dir, &target_path, channel, running_app_path).await
             }
-            "windows" => install_release_windows(&target_path).await,
+            "windows" => {
+                install_release_windows(&target_path, running_app_path, rp_installer_asset).await
+            }
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }
     }
@@ -1003,6 +1696,114 @@ async fn download_remote_server_binary(
     smol::fs::rename(&temp, &target_path).await?;
 
     Ok(())
+}
+
+async fn verify_rp_file(path: &Path, asset: &RpManifestAsset) -> Result<bool> {
+    let metadata = match smol::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.len() != asset.size {
+        return Ok(false);
+    }
+    let mut file = File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()) == asset.sha256)
+}
+
+async fn download_rp_asset(
+    target_path: &Path,
+    asset: &RpManifestAsset,
+    client: Arc<HttpClientWithUrl>,
+    mut on_progress: impl FnMut(Option<f32>),
+) -> Result<()> {
+    let result = async {
+        anyhow::ensure!(
+            asset.url
+                == expected_rp_asset_url(
+                    asset
+                        .url
+                        .strip_prefix(&format!("{RP_REPOSITORY_RELEASES}/"))
+                        .and_then(|rest| rest.split_once('/'))
+                        .map(|(tag, _)| tag)
+                        .context("RP asset URL has no release tag")?,
+                    &asset.name
+                ),
+            "RP asset URL is not an exact repository release URL"
+        );
+        let mut response =
+            rp_get_response(&client, &asset.url, RpRequestKind::ReleaseAsset).await?;
+        if let Some(content_length) = response
+            .headers()
+            .get(http_client::http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            anyhow::ensure!(
+                content_length == asset.size,
+                "RP asset Content-Length does not match manifest"
+            );
+        }
+
+        let mut target_file = File::create(target_path).await?;
+        let mut hasher = Sha256::new();
+        let mut written = 0u64;
+        let mut last_reported_percent = None;
+        let mut buffer = [0u8; 8192];
+        loop {
+            let read = response.body_mut().read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            anyhow::ensure!(
+                written + read as u64 <= asset.size,
+                "RP asset exceeded its declared size"
+            );
+            target_file.write_all(&buffer[..read]).await?;
+            hasher.update(&buffer[..read]);
+            written += read as u64;
+            let fraction = (written as f32 / asset.size as f32).clamp(0.0, 1.0);
+            let percent = (fraction * 100.0) as u8;
+            if last_reported_percent != Some(percent) {
+                last_reported_percent = Some(percent);
+                on_progress(Some(fraction));
+            }
+        }
+        target_file.flush().await?;
+        drop(target_file);
+        anyhow::ensure!(
+            written == asset.size,
+            "RP asset size mismatch: expected {}, wrote {written}",
+            asset.size
+        );
+        let digest = format!("{:x}", hasher.finalize());
+        anyhow::ensure!(
+            digest == asset.sha256,
+            "RP asset SHA-256 mismatch; {RP_UNSIGNED_TRUST_NOTICE}"
+        );
+        if last_reported_percent != Some(100) {
+            on_progress(Some(1.0));
+        }
+        log::info!(
+            "downloaded verified RP update. path:{:?}, bytes_written:{written}",
+            target_path
+        );
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        _ = smol::fs::remove_file(target_path).await;
+    }
+    result
 }
 
 async fn cleanup_remote_server_cache(
@@ -1286,10 +2087,18 @@ async fn cleanup_stale_installer_dirs() {
 }
 
 async fn cleanup_windows() -> Result<()> {
-    let parent = std::env::current_exe()?
-        .parent()
-        .context("No parent dir for Zed.exe")?
-        .to_owned();
+    let current_exe = std::env::current_exe()?;
+    let parent = if release_channel::rp_release_metadata().is_some() {
+        let local_app_data = env::var("LOCALAPPDATA").context("LOCALAPPDATA is not set")?;
+        PathBuf::from(
+            validate_rp_windows_path_model(&local_app_data, &current_exe.to_string_lossy())?.root,
+        )
+    } else {
+        current_exe
+            .parent()
+            .context("No parent dir for Zed.exe")?
+            .to_owned()
+    };
 
     // keep in sync with crates/auto_update_helper/src/updater.rs
     _ = smol::fs::remove_dir(parent.join("updates")).await;
@@ -1299,7 +2108,236 @@ async fn cleanup_windows() -> Result<()> {
     Ok(())
 }
 
-async fn install_release_windows(downloaded_installer: &Path) -> Result<Option<PathBuf>> {
+#[derive(Debug, PartialEq, Eq)]
+struct RpWindowsPathModel {
+    root: String,
+    running_exe: String,
+}
+
+fn normalize_windows_path_model(path: &str) -> Result<String> {
+    anyhow::ensure!(!path.is_empty(), "empty Windows path");
+    let path = if path
+        .as_bytes()
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(br"\\?\"))
+    {
+        &path[4..]
+    } else {
+        path
+    };
+    anyhow::ensure!(
+        !path.starts_with(r"\\") && !path.starts_with(r"\\.\"),
+        "UNC and device paths are not allowed"
+    );
+    anyhow::ensure!(
+        path.len() >= 3
+            && path.as_bytes()[0].is_ascii_alphabetic()
+            && path.as_bytes()[1] == b':'
+            && (path.as_bytes()[2] == b'\\' || path.as_bytes()[2] == b'/'),
+        "Windows path must be absolute"
+    );
+    let path = path.replace('/', r"\");
+    let mut components = path[3..].split('\\').collect::<Vec<_>>();
+    while components.last() == Some(&"") {
+        components.pop();
+    }
+    anyhow::ensure!(
+        components
+            .iter()
+            .all(|component| !component.is_empty() && *component != "." && *component != ".."),
+        "Windows path contains an empty, dot, or parent component"
+    );
+    let drive = path[..2].to_ascii_uppercase();
+    let suffix = components.join(r"\");
+    if suffix.is_empty() {
+        Ok(format!("{drive}\\"))
+    } else {
+        Ok(format!("{drive}\\{suffix}"))
+    }
+}
+
+fn validate_rp_windows_path_model(
+    local_app_data: &str,
+    running_app_path: &str,
+) -> Result<RpWindowsPathModel> {
+    let local_app_data = normalize_windows_path_model(local_app_data)?;
+    let running_app_path = normalize_windows_path_model(running_app_path)?;
+    let root = format!(r"{local_app_data}\Programs\Zed-ACP-Patched");
+    let expected_exe = format!(r"{root}\Zed.exe");
+    anyhow::ensure!(
+        running_app_path.eq_ignore_ascii_case(&expected_exe),
+        "running RP executable is not the exact side-by-side Zed-ACP-Patched layout"
+    );
+    Ok(RpWindowsPathModel {
+        root,
+        running_exe: running_app_path,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_paths_equal(left: &Path, right: &Path) -> Result<bool> {
+    Ok(normalize_windows_path_model(&left.to_string_lossy())?
+        .eq_ignore_ascii_case(&normalize_windows_path_model(&right.to_string_lossy())?))
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_path_is_not_reparse(path: &Path) -> Result<()> {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("failed to inspect Windows path {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 == 0,
+        "RP installation path contains a reparse point: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_windows_path_components_are_not_reparse(path: &Path) -> Result<()> {
+    use std::path::Component;
+
+    let normalized = PathBuf::from(normalize_windows_path_model(&path.to_string_lossy())?);
+    let mut current = PathBuf::new();
+    for component in normalized.components() {
+        current.push(component);
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
+        ensure_windows_path_is_not_reparse(&current)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn verify_rp_windows_running_install(
+    running_app_path: &Path,
+    metadata: RpReleaseMetadata,
+) -> Result<(PathBuf, PathBuf)> {
+    let local_app_data = env::var("LOCALAPPDATA").context("LOCALAPPDATA is not set")?;
+    let model =
+        validate_rp_windows_path_model(&local_app_data, &running_app_path.to_string_lossy())?;
+    let root = PathBuf::from(&model.root);
+
+    ensure_windows_path_components_are_not_reparse(&root)?;
+
+    let canonical_root =
+        std::fs::canonicalize(&root).context("failed to canonicalize RP installation root")?;
+    anyhow::ensure!(
+        windows_paths_equal(&canonical_root, &root)?,
+        "RP installation root canonicalized outside the expected location"
+    );
+    let canonical_running = std::fs::canonicalize(running_app_path)
+        .context("failed to canonicalize running RP executable")?;
+    anyhow::ensure!(
+        windows_paths_equal(&canonical_running, &root.join("Zed.exe"))?,
+        "running executable canonicalized outside the RP installation root"
+    );
+    ensure_windows_path_components_are_not_reparse(&canonical_running)?;
+
+    let marker = root.join(".zed-rp-installer");
+    ensure_windows_path_components_are_not_reparse(&marker)?;
+    let marker_text =
+        std::fs::read_to_string(&marker).context("failed to read RP installer marker")?;
+    let mut marker_lines = marker_text.lines();
+    anyhow::ensure!(
+        marker_lines.next() == Some("identity=Zed-ACP-Patched-RP-Stable"),
+        "RP installer marker has the wrong identity prefix"
+    );
+    let marker_version = marker_lines
+        .next()
+        .and_then(|line| line.strip_prefix("version="))
+        .context("RP installer marker has no calendar version")?;
+    anyhow::ensure!(
+        RpCalendarVersion::parse(marker_version)?
+            >= RpCalendarVersion::parse(metadata.calendar_version)?,
+        "RP installer marker calendar version predates the running build"
+    );
+
+    const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{4A5A5F9D-AE49-4238-AD6B-FD55FEF6DA84}_is1";
+    let uninstall_key = windows_registry::CURRENT_USER
+        .open(UNINSTALL_KEY)
+        .context("RP Inno uninstall registry key is missing")?;
+    let registry_root = uninstall_key
+        .get_string("Inno Setup: App Path")
+        .context("RP Inno App Path registry value is missing")?;
+    anyhow::ensure!(
+        normalize_windows_path_model(&registry_root)?.eq_ignore_ascii_case(&model.root),
+        "RP Inno App Path does not exactly match the verified installation root"
+    );
+
+    let helper = root.join("tools").join("auto_update_helper.exe");
+    let canonical_helper =
+        std::fs::canonicalize(&helper).context("failed to canonicalize RP update helper")?;
+    anyhow::ensure!(
+        windows_paths_equal(&canonical_helper, &helper)?,
+        "RP update helper canonicalized outside the installation root"
+    );
+    ensure_windows_path_components_are_not_reparse(&canonical_helper)?;
+
+    Ok((root, canonical_helper))
+}
+
+#[cfg(target_os = "windows")]
+fn verify_rp_windows_install(
+    downloaded_installer: &Path,
+    running_app_path: &Path,
+    metadata: RpReleaseMetadata,
+) -> Result<(PathBuf, PathBuf, PathBuf)> {
+    let (root, canonical_helper) = verify_rp_windows_running_install(running_app_path, metadata)?;
+    let canonical_installer = std::fs::canonicalize(downloaded_installer)
+        .context("failed to canonicalize downloaded RP installer")?;
+    anyhow::ensure!(
+        windows_paths_equal(
+            canonical_installer
+                .parent()
+                .context("downloaded RP installer has no parent")?,
+            &root.join("updates")
+        )?,
+        "downloaded RP installer is outside the verified staging directory"
+    );
+    ensure_windows_path_components_are_not_reparse(&canonical_installer)?;
+    Ok((root, canonical_helper, canonical_installer))
+}
+
+async fn install_release_windows(
+    downloaded_installer: &Path,
+    running_app_path: PathBuf,
+    rp_installer_asset: Option<RpManifestAsset>,
+) -> Result<Option<PathBuf>> {
+    if let Some(metadata) = release_channel::rp_release_metadata() {
+        #[cfg(target_os = "windows")]
+        {
+            let (verified_root, helper_path, canonical_installer) =
+                verify_rp_windows_install(downloaded_installer, &running_app_path, metadata)?;
+            let rp_installer_asset =
+                rp_installer_asset.context("verified RP install has no manifest asset")?;
+            anyhow::ensure!(
+                verify_rp_file(&canonical_installer, &rp_installer_asset).await?,
+                "RP installer changed after download verification"
+            );
+            let mut cmd = new_command(canonical_installer);
+            cmd.arg("/verysilent")
+                .arg("/update=true")
+                .arg("/MERGETASKS=!desktopicon")
+                .arg(format!("/DIR={}", verified_root.display()));
+            let output = cmd.output().await?;
+            anyhow::ensure!(
+                output.status.success(),
+                "failed to start verified unsigned RP installer: {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return Ok(Some(helper_path));
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (metadata, running_app_path, rp_installer_asset);
+            anyhow::bail!("RP Windows installer validation is only available on Windows");
+        }
+    }
+
     let mut cmd = new_command(downloaded_installer);
     cmd.arg("/verysilent")
         .arg("/update=true")
@@ -1371,6 +2409,391 @@ mod tests {
 
     pub(super) struct InstallOverride(pub Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>);
     impl Global for InstallOverride {}
+
+    const TEST_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn sample_manifest(calendar: &str, upstream: &str) -> serde_json::Value {
+        let tag = format!("rp-stable-{calendar}");
+        let asset = |key: &str| {
+            let name = expected_rp_asset_name(key, calendar).unwrap();
+            serde_json::json!({
+                "name": name,
+                "size": 4,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "url": expected_rp_asset_url(&tag, &name),
+            })
+        };
+        serde_json::json!({
+            "schema_version": 1,
+            "channel": "rp-stable",
+            "calendar_version": calendar,
+            "upstream_version": upstream,
+            "commit": TEST_COMMIT,
+            "tag": tag,
+            "trust": {"signed": false, "label": "unsigned"},
+            "notes_identity": format!("sha256:{}", "b".repeat(64)),
+            "assets": {
+                "windows_x86_64_installer": asset("windows_x86_64_installer"),
+                "windows_x86_64_portable": asset("windows_x86_64_portable"),
+                "windows_x86_64_remote_server": asset("windows_x86_64_remote_server"),
+                "linux_x86_64_remote_server": asset("linux_x86_64_remote_server"),
+            }
+        })
+    }
+
+    fn validated_sample(calendar: &str, upstream: &str) -> Result<ValidatedRpManifest> {
+        validate_rp_manifest(serde_json::from_value(sample_manifest(calendar, upstream))?)
+    }
+
+    fn compile_identity(calendar: &str, upstream: &str) -> RpCompileIdentity {
+        RpCompileIdentity {
+            calendar: RpCalendarVersion::parse(calendar).unwrap(),
+            calendar_version: calendar.to_string(),
+            tag: format!("rp-stable-{calendar}"),
+            commit: TEST_COMMIT.to_string(),
+            upstream_version: upstream.parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn rp_and_official_update_sources_are_isolated() {
+        let metadata = RpReleaseMetadata {
+            calendar_version: "20260902.1",
+            release_tag: "rp-stable-20260902.1",
+            release_notes: "",
+            notes_identity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            manifest: "{}",
+        };
+        assert_eq!(
+            update_endpoint_source(Some(metadata)),
+            UpdateEndpointSource::Rp
+        );
+        assert_eq!(
+            release_discovery_endpoint(UpdateEndpointSource::Rp),
+            "https://api.github.com/repos/JonathonRP/zed/releases?per_page=100"
+        );
+        assert_eq!(update_endpoint_source(None), UpdateEndpointSource::Official);
+        assert!(
+            release_discovery_endpoint(UpdateEndpointSource::Official).starts_with("/releases")
+        );
+        assert!(!release_discovery_endpoint(UpdateEndpointSource::Rp).contains("zed.dev"));
+        assert!(!release_discovery_endpoint(UpdateEndpointSource::Official).contains("JonathonRP"));
+    }
+
+    #[test]
+    fn rp_calendar_and_candidate_comparison_are_monotonic() {
+        assert!(RpCalendarVersion::parse("20240229.1").is_ok());
+        for invalid in [
+            "20230229.1",
+            "20261301.1",
+            "20260931.1",
+            "20260902.0",
+            "20260902.01",
+            "2026092.1",
+        ] {
+            assert!(RpCalendarVersion::parse(invalid).is_err(), "{invalid}");
+        }
+
+        let installed = compile_identity("20260902.1", "1.2.3");
+        let newer = validated_sample("20260903.1", "1.2.3").unwrap().identity;
+        assert!(newer_rp_candidate(&installed, None, &newer).unwrap());
+        let higher_upstream = validated_sample("20260903.1", "1.3.0").unwrap().identity;
+        assert!(newer_rp_candidate(&installed, None, &higher_upstream).unwrap());
+        let upstream_downgrade = validated_sample("20260903.1", "1.2.2").unwrap().identity;
+        assert!(newer_rp_candidate(&installed, None, &upstream_downgrade).is_err());
+
+        let same = validated_sample("20260902.1", "1.2.3").unwrap().identity;
+        assert!(!newer_rp_candidate(&installed, None, &same).unwrap());
+        let downgrade = validated_sample("20260901.9", "1.3.0").unwrap().identity;
+        assert!(!newer_rp_candidate(&installed, None, &downgrade).unwrap());
+        let staged = newer;
+        let rerun = validated_sample("20260903.1", "1.2.3").unwrap().identity;
+        assert!(!newer_rp_candidate(&installed, Some(&staged), &rerun).unwrap());
+    }
+
+    #[test]
+    fn rp_manifest_is_strict_and_repository_bound() {
+        assert!(validated_sample("20260902.1", "1.2.3").is_ok());
+        for (pointer, replacement) in [
+            ("/schema_version", serde_json::json!(2)),
+            ("/channel", serde_json::json!("stable")),
+            ("/tag", serde_json::json!("rp-stable-20260903.1")),
+            ("/upstream_version", serde_json::json!("not-semver")),
+            ("/commit", serde_json::json!("ABC")),
+            ("/trust/signed", serde_json::json!(true)),
+            ("/trust/label", serde_json::json!("signed")),
+            ("/notes_identity", serde_json::json!("sha256:ABC")),
+            (
+                "/assets/windows_x86_64_installer/url",
+                serde_json::json!("https://github.com/zed-industries/zed/releases/download/x/y"),
+            ),
+            (
+                "/assets/windows_x86_64_installer/name",
+                serde_json::json!("Zed.exe"),
+            ),
+            (
+                "/assets/windows_x86_64_installer/size",
+                serde_json::json!(0),
+            ),
+            (
+                "/assets/windows_x86_64_installer/sha256",
+                serde_json::json!("A".repeat(64)),
+            ),
+        ] {
+            let mut manifest = sample_manifest("20260902.1", "1.2.3");
+            *manifest.pointer_mut(pointer).unwrap() = replacement;
+            let parsed: Result<RpUpdateManifest, _> = serde_json::from_value(manifest);
+            assert!(
+                parsed.is_err() || validate_rp_manifest(parsed.unwrap()).is_err(),
+                "accepted malformed field {pointer}"
+            );
+        }
+
+        let mut duplicate_name = sample_manifest("20260902.1", "1.2.3");
+        let installer_name = duplicate_name["assets"]["windows_x86_64_installer"]["name"].clone();
+        duplicate_name["assets"]["windows_x86_64_portable"]["name"] = installer_name;
+        let parsed: RpUpdateManifest = serde_json::from_value(duplicate_name).unwrap();
+        assert!(validate_rp_manifest(parsed).is_err());
+
+        let mut missing = sample_manifest("20260902.1", "1.2.3");
+        missing["assets"]
+            .as_object_mut()
+            .unwrap()
+            .remove("linux_x86_64_remote_server");
+        assert!(serde_json::from_value::<RpUpdateManifest>(missing).is_err());
+        let mut missing_notes = sample_manifest("20260902.1", "1.2.3");
+        missing_notes
+            .as_object_mut()
+            .unwrap()
+            .remove("notes_identity");
+        assert!(serde_json::from_value::<RpUpdateManifest>(missing_notes).is_err());
+
+        let mut unknown = sample_manifest("20260902.1", "1.2.3");
+        unknown["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<RpUpdateManifest>(unknown).is_err());
+
+        let duplicate_field = serde_json::to_string(&sample_manifest("20260902.1", "1.2.3"))
+            .unwrap()
+            .replacen(
+                r#""schema_version":1"#,
+                r#""schema_version":1,"schema_version":1"#,
+                1,
+            );
+        assert!(serde_json::from_str::<RpUpdateManifest>(&duplicate_field).is_err());
+    }
+
+    #[test]
+    fn rp_release_discovery_selects_newest_calendar_and_requires_one_manifest() {
+        let release = |tag: &str, manifest_count: usize| GithubRelease {
+            tag_name: tag.to_string(),
+            draft: false,
+            prerelease: false,
+            assets: (0..manifest_count)
+                .map(|_| GithubReleaseAsset {
+                    name: RP_MANIFEST_NAME.to_string(),
+                    browser_download_url: expected_rp_asset_url(tag, RP_MANIFEST_NAME),
+                })
+                .collect(),
+        };
+        let releases = vec![
+            release("rp-stable-20260901.9", 1),
+            release("rp-stable-not-a-calendar", 1),
+            release("rp-stable-20260903.1", 1),
+            release("rp-stable-20260902.4", 1),
+        ];
+        assert_eq!(
+            select_newest_rp_release(&releases).unwrap().0.tag_name,
+            "rp-stable-20260903.1"
+        );
+        assert!(select_newest_rp_release(&[release("rp-stable-20260903.1", 0)]).is_err());
+        assert!(select_newest_rp_release(&[release("rp-stable-20260903.1", 2)]).is_err());
+    }
+
+    #[test]
+    fn rp_redirect_allowlist_is_https_and_host_exact() {
+        for allowed in [
+            "https://objects.githubusercontent.com/object",
+            "https://release-assets.githubusercontent.com/object",
+            "https://github-releases.githubusercontent.com/object",
+        ] {
+            assert!(is_allowed_rp_redirect(
+                RpRequestKind::ReleaseAsset,
+                &http_client::Url::parse(allowed).unwrap()
+            ));
+        }
+        for rejected in [
+            "http://release-assets.githubusercontent.com/object",
+            "https://release-assets.githubusercontent.com.evil.example/object",
+            "https://github.com/JonathonRP/zed/releases/download/x/y",
+            "https://user@objects.githubusercontent.com/object",
+            "https://objects.githubusercontent.com:444/object",
+        ] {
+            assert!(!is_allowed_rp_redirect(
+                RpRequestKind::ReleaseAsset,
+                &http_client::Url::parse(rejected).unwrap()
+            ));
+        }
+        assert!(is_allowed_rp_redirect(
+            RpRequestKind::Api,
+            &http_client::Url::parse("https://api.github.com/next").unwrap()
+        ));
+        assert!(!is_allowed_rp_redirect(
+            RpRequestKind::Api,
+            &http_client::Url::parse("https://github.com/next").unwrap()
+        ));
+    }
+
+    #[test]
+    fn rp_windows_path_model_rejects_overlapping_and_ambiguous_paths() {
+        let local = r"C:\Users\RP\AppData\Local";
+        let expected = r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched\Zed.exe";
+        let model = validate_rp_windows_path_model(local, expected).unwrap();
+        assert_eq!(
+            model.root,
+            r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched"
+        );
+        assert!(validate_rp_windows_path_model(local, &expected.to_ascii_lowercase()).is_ok());
+        assert!(
+            validate_rp_windows_path_model(&format!(r"\\?\{local}"), &format!(r"\\?\{expected}"))
+                .is_ok()
+        );
+        for rejected in [
+            r"C:\Users\RP\AppData\Local\Programs\Zed\Zed.exe",
+            r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched-Evil\Zed.exe",
+            r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched\sub\..\Zed.exe",
+            r"..\Programs\Zed-ACP-Patched\Zed.exe",
+            r"\\server\share\Zed.exe",
+            r"\\.\C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched\Zed.exe",
+            r"\\?\UNC\server\share\Zed.exe",
+        ] {
+            assert!(
+                validate_rp_windows_path_model(local, rejected).is_err(),
+                "{rejected}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rp_windows_reparse_walk_accepts_canonical_verbatim_paths() {
+        let current_exe = std::env::current_exe().unwrap();
+        let canonical_exe = std::fs::canonicalize(current_exe).unwrap();
+        ensure_windows_path_components_are_not_reparse(&canonical_exe).unwrap();
+    }
+
+    #[test]
+    fn matching_rp_remote_selection_is_exact() {
+        let installed = compile_identity("20260902.1", "1.2.3");
+        let manifest = validated_sample("20260902.1", "1.2.3").unwrap();
+        assert!(validate_matching_remote_manifest(&installed, &manifest).is_ok());
+        assert_eq!(
+            rp_remote_asset(&manifest, "linux", "x86_64").unwrap().name,
+            "zed-rp-stable-20260902.1-remote-server-linux-x86_64.gz"
+        );
+        assert!(rp_remote_asset(&manifest, "windows", "x86_64").is_err());
+        let mut wrong_commit = manifest;
+        wrong_commit.identity.commit = "1123456789abcdef0123456789abcdef01234567".into();
+        assert!(validate_matching_remote_manifest(&installed, &wrong_commit).is_err());
+    }
+
+    #[gpui::test]
+    async fn rp_download_rejects_size_and_digest_and_cleans_up(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let client = FakeHttpClient::create(|request| async move {
+            assert_eq!(
+                request
+                    .headers()
+                    .get(http_client::http::header::ACCEPT_ENCODING)
+                    .unwrap(),
+                "identity"
+            );
+            assert!(!request.headers().contains_key("authorization"));
+            assert!(!request.headers().contains_key("cookie"));
+            Ok(Response::builder()
+                .status(200)
+                .body(Vec::from("data").into())
+                .unwrap())
+        });
+        let temp = tempdir().unwrap();
+        let target = temp.path().join("asset");
+        let mut asset = validated_sample("20260902.1", "1.2.3")
+            .unwrap()
+            .manifest
+            .assets
+            .windows_x86_64_installer;
+        asset.size = 3;
+        assert!(
+            download_rp_asset(&target, &asset, client.clone(), |_| {})
+                .await
+                .is_err()
+        );
+        assert!(!target.exists());
+
+        asset.size = 4;
+        asset.sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        assert!(
+            download_rp_asset(&target, &asset, client, |_| {})
+                .await
+                .is_err()
+        );
+        assert!(!target.exists());
+    }
+
+    #[gpui::test]
+    async fn rp_discovery_uses_only_pinned_github_endpoints(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+        let manifest = serde_json::to_vec(&sample_manifest("20260902.1", "1.2.3")).unwrap();
+        let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let client = FakeHttpClient::create({
+            let calls = calls.clone();
+            move |request| {
+                let manifest = manifest.clone();
+                let calls = calls.clone();
+                async move {
+                    let uri = request.uri().to_string();
+                    calls.lock().push(uri.clone());
+                    assert_eq!(
+                        request
+                            .headers()
+                            .get(http_client::http::header::ACCEPT_ENCODING)
+                            .unwrap(),
+                        "identity"
+                    );
+                    if uri == RP_RELEASES_API {
+                        let releases = serde_json::json!([{
+                            "tag_name": "rp-stable-20260902.1",
+                            "draft": false,
+                            "prerelease": false,
+                            "assets": [{
+                                "name": "rp-update.json",
+                                "browser_download_url": expected_rp_asset_url(
+                                    "rp-stable-20260902.1",
+                                    RP_MANIFEST_NAME
+                                )
+                            }]
+                        }]);
+                        Ok(Response::builder()
+                            .status(200)
+                            .body(serde_json::to_vec(&releases).unwrap().into())
+                            .unwrap())
+                    } else {
+                        Ok(Response::builder()
+                            .status(200)
+                            .body(manifest.into())
+                            .unwrap())
+                    }
+                }
+            }
+        });
+        let discovered = discover_latest_rp_manifest(&client).await.unwrap();
+        assert_eq!(discovered.identity.calendar_version, "20260902.1");
+        let calls = calls.lock();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|url| {
+            url.starts_with("https://api.github.com/")
+                || url.starts_with("https://github.com/JonathonRP/zed/releases/download/")
+        }));
+    }
 
     #[gpui::test]
     fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {

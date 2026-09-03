@@ -570,7 +570,14 @@ fn show_update_notification(cx: &mut App) {
     let mut version = updater.read(cx).current_version();
     version.pre = semver::Prerelease::EMPTY;
     version.build = semver::BuildMetadata::EMPTY;
-    let app_name = ReleaseChannel::global(cx).display_name();
+    let update_identity = rp_release_metadata()
+        .map(|release| {
+            format!(
+                "Unsigned RP Stable {} (Zed {})",
+                release.calendar_version, version
+            )
+        })
+        .unwrap_or_else(|| format!("{} {}", ReleaseChannel::global(cx).display_name(), version));
 
     if let Some(content) = announcement_for_version(&version, cx) {
         show_app_notification(
@@ -585,7 +592,7 @@ fn show_update_notification(cx: &mut App) {
             move |cx| {
                 let workspace_handle = cx.entity().downgrade();
                 cx.new(|cx| {
-                    MessageNotification::new(format!("Updated to {app_name} {}", version), cx)
+                    MessageNotification::new(format!("Updated to {update_identity}"), cx)
                         .primary_message("View Release Notes")
                         .primary_on_click(move |window, cx| {
                             if let Some(workspace) = workspace_handle.upgrade() {
