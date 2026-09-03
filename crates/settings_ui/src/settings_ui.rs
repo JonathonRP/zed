@@ -648,6 +648,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::PaneSplitDirectionVertical>(render_dropdown)
         .add_basic_renderer::<settings::CodeLens>(render_dropdown)
         .add_basic_renderer::<settings::DocumentColorsRenderMode>(render_dropdown)
+        .add_basic_renderer::<settings::LspDocumentColorInlayShape>(render_dropdown)
         .add_basic_renderer::<settings::ThemeSelectionDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::ThemeAppearanceMode>(render_dropdown)
         .add_basic_renderer::<settings::ThemeName>(render_theme_picker)
@@ -5308,6 +5309,19 @@ fn render_icon_theme_picker(
 pub mod test {
 
     use super::*;
+
+    #[gpui::test]
+    fn registers_lsp_document_color_inlay_shape_renderer(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init_renderers(cx);
+            assert!(
+                cx.default_global::<SettingFieldRenderer>()
+                    .renderers
+                    .borrow()
+                    .contains_key(&TypeId::of::<settings::LspDocumentColorInlayShape>())
+            );
+        });
+    }
 
     impl SettingsWindow {
         fn navbar_entry(&self) -> usize {

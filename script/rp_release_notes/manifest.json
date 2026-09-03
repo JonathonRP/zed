@@ -1,0 +1,16 @@
+{
+  "fragments": [
+    {
+      "id": "acp-replay-reliability",
+      "file": "script/rp_release_notes/fragments/acp-replay-reliability.md"
+    },
+    {
+      "id": "document-color-swatch-shapes",
+      "file": "script/rp_release_notes/fragments/document-color-swatch-shapes.md"
+    },
+    {
+      "id": "rp-calendar-releases",
+      "file": "script/rp_release_notes/fragments/rp-calendar-releases.md"
+    }
+  ]
+}
