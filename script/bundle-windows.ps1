@@ -15,6 +15,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $buildSuccess = $false
 $canCodeSign = $false
+$isRpPackage = -not [string]::IsNullOrWhiteSpace($env:ZED_RP_RELEASE_VERSION)
 
 $OSArchitecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     "X64" { "x86_64" }
@@ -101,6 +102,11 @@ function CheckEnvironmentVariables {
         }
     }
 
+    if ($isRpPackage) {
+        Write-Host "RP stable installers are intentionally unsigned"
+        return
+    }
+
     # On PRs from forks the signing secrets are not populated,
     # so skip code signing instead of failing, like bundle-mac does.
     $signingVars = @(
@@ -130,6 +136,12 @@ function PrepareForBundle {
     New-Item -Path "$innoDir\appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
     New-Item -Path "$innoDir\tools" -ItemType Directory -Force
+    if ($isRpPackage) {
+        @(
+            "identity=Zed-ACP-Patched-RP-Stable"
+            "version=$env:ZED_RP_RELEASE_VERSION"
+        ) | Set-Content -Path "$innoDir\zed-rp-installer.marker"
+    }
 
     rustup target add $target
 }
@@ -362,6 +374,23 @@ function BuildInstaller {
         }
     }
 
+    if ($isRpPackage) {
+        if ($channel -ne "stable") {
+            throw "RP packaging metadata may only be used with the stable release channel"
+        }
+
+        $appId = "{{4A5A5F9D-AE49-4238-AD6B-FD55FEF6DA84}"
+        $appName = "Zed-ACP-Patched"
+        $appDisplayName = "Zed-ACP-Patched (Unsigned RP Stable)"
+        # This must match release_channel::app_identifier() plus the runtime mutex suffix.
+        $appMutex = "Zed-ACP-Patched-RP-Stable-Instance-Mutex"
+        $appExeName = "Zed"
+        $regValueName = "ZedACPPatchedRPStable"
+        $appUserId = "Zed-ACP-Patched-RP-Stable"
+        $appShellNameShort = "Zed-ACP-Patched"
+        $appAppxFullName = ""
+    }
+
     # Windows runner 2022 default has iscc in PATH, https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
     # Currently, we are using Windows 2022 runner.
     # Windows runner 2025 doesn't have iscc in PATH for now, https://github.com/actions/runner-images/issues/11228
@@ -383,6 +412,10 @@ function BuildInstaller {
         "Version"        = "$env:RELEASE_VERSION"
         "SourceDir"      = "$env:ZED_WORKSPACE"
         "AppxFullName"   = $appAppxFullName
+    }
+    if ($isRpPackage) {
+        $definitions["RpPackage"] = "1"
+        $env:ZED_SIGN_BUNDLE = $null
     }
 
     $defs = @()

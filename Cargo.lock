@@ -1399,10 +1399,13 @@ dependencies = [
  "serde",
  "serde_json",
  "settings",
+ "sha2",
  "smol",
  "tempfile",
  "util",
  "which 6.0.3",
+ "windows 0.61.3",
+ "windows-registry 0.6.1",
  "workspace",
  "zlog",
 ]

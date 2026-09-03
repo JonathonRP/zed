@@ -43,7 +43,19 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 /// The app identifier for the current release channel, Windows only.
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
-    match *RELEASE_CHANNEL {
+    app_identifier_for(*RELEASE_CHANNEL, rp_release_metadata().is_some())
+}
+
+#[cfg(any(target_os = "windows", test))]
+const RP_APP_IDENTIFIER: &str = "Zed-ACP-Patched-RP-Stable";
+
+#[cfg(any(target_os = "windows", test))]
+fn app_identifier_for(release_channel: ReleaseChannel, has_rp_metadata: bool) -> &'static str {
+    if has_rp_metadata {
+        return RP_APP_IDENTIFIER;
+    }
+
+    match release_channel {
         ReleaseChannel::Dev => "Zed-Editor-Dev",
         ReleaseChannel::Nightly => "Zed-Editor-Nightly",
         ReleaseChannel::Preview => "Zed-Editor-Preview",
@@ -326,7 +338,20 @@ impl FromStr for ReleaseChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::ReleaseChannel;
+    use super::{RP_APP_IDENTIFIER, ReleaseChannel, app_identifier_for};
+
+    #[test]
+    fn rp_windows_identity_does_not_overlap_official_channels() {
+        for channel in ReleaseChannel::ALL {
+            let official_identifier = app_identifier_for(channel, false);
+            assert_ne!(RP_APP_IDENTIFIER, official_identifier);
+            assert_eq!(
+                app_identifier_for(channel, true),
+                RP_APP_IDENTIFIER,
+                "complete RP metadata must select the fork identity"
+            );
+        }
+    }
 
     #[test]
     fn test_docs_url_for_release_channel() {
