@@ -26,13 +26,61 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  metadata:
+    name: Allocate RP release metadata
+    if: >-
+      github.repository == 'JonathonRP/zed' &&
+      github.ref == 'refs/heads/release/rp-stable'
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.allocate.outputs.version }}
+      tag: ${{ steps.allocate.outputs.tag }}
+      reused: ${{ steps.allocate.outputs.reused }}
+    steps:
+      - name: Checkout full release history
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch all RP release tags
+        run: git fetch --force --tags origin
+
+      - name: Allocate calendar version and curate notes
+        id: allocate
+        run: |
+          python3 script/rp_release_metadata.py \
+            --output-dir target/rp-release-metadata \
+            --github-output "$GITHUB_OUTPUT"
+          python3 -m json.tool \
+            target/rp-release-metadata/rp-release-manifest.json \
+            >/dev/null
+
+      - name: Upload RP release metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rp-release-metadata-${{ steps.allocate.outputs.version }}
+          path: target/rp-release-metadata/*
+          if-no-files-found: error
+          retention-days: 30
+
   package_windows:
     name: Package unsigned Windows stable
+    needs: metadata
+    if: >-
+      github.repository == 'JonathonRP/zed' &&
+      github.ref == 'refs/heads/release/rp-stable'
     runs-on: ${{ vars.ZED_WINDOWS_RUNNER || 'windows-2022' }}
     timeout-minutes: 360
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Download RP release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rp-release-metadata-${{ needs.metadata.outputs.version }}
+          path: target/rp-release-metadata
 
       - name: Cache Cargo sources
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -56,6 +104,17 @@ jobs:
           CARGO_BUILD_JOBS: "1"
           ZED_CLIENT_CHECKSUM_SEED: fork-unsigned-stable
         run: |
+          $metadataPath = "target/rp-release-metadata/rp-release-manifest.json"
+          $metadata = Get-Content -Raw $metadataPath | ConvertFrom-Json
+          if ($metadata.calendar_version -ne "${{ needs.metadata.outputs.version }}") {
+            throw "RP metadata version does not match the workflow allocation"
+          }
+          $env:ZED_RP_RELEASE_VERSION = $metadata.calendar_version
+          $env:ZED_RP_RELEASE_TAG = $metadata.tag
+          $env:ZED_RP_RELEASE_NOTES = Get-Content -Raw "target/rp-release-metadata/release-notes.md"
+          $env:ZED_RP_RELEASE_NOTES_IDENTITY = $metadata.notes_identity
+          $env:ZED_RP_RELEASE_MANIFEST = Get-Content -Raw $metadataPath
+
           script/bundle-windows.ps1 `
             -Architecture x86_64 `
             -ZedFeatures remote/build-remote-server-binary
@@ -65,6 +124,17 @@ jobs:
             -CompressionLevel Optimal `
             -Force
 
+          $version = $metadata.calendar_version
+          Move-Item -Force `
+            target/Zed-x86_64.exe `
+            "target/Zed-rp-stable-$version-windows-x86_64.exe"
+          Move-Item -Force `
+            target/zed-windows-x86_64-portable.zip `
+            "target/zed-rp-stable-$version-windows-x86_64-portable.zip"
+          Move-Item -Force `
+            target/zed-remote-server-windows-x86_64.zip `
+            "target/zed-rp-stable-$version-remote-server-windows-x86_64.zip"
+
       - name: Show sccache statistics
         if: always()
         shell: pwsh
@@ -73,16 +143,20 @@ jobs:
       - name: Upload Windows packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: windows-x86_64
+          name: rp-package-windows-x86_64-${{ needs.metadata.outputs.version }}
           path: |
-            target/Zed-x86_64.exe
-            target/zed-windows-x86_64-portable.zip
-            target/zed-remote-server-windows-x86_64.zip
+            target/Zed-rp-stable-${{ needs.metadata.outputs.version }}-windows-x86_64.exe
+            target/zed-rp-stable-${{ needs.metadata.outputs.version }}-windows-x86_64-portable.zip
+            target/zed-rp-stable-${{ needs.metadata.outputs.version }}-remote-server-windows-x86_64.zip
           if-no-files-found: error
           retention-days: 30
 
   package_linux_remote_server:
     name: Package Linux musl remote server
+    needs: metadata
+    if: >-
+      github.repository == 'JonathonRP/zed' &&
+      github.ref == 'refs/heads/release/rp-stable'
     runs-on: ${{ vars.ZED_LINUX_RUNNER || 'ubuntu-22.04' }}
     timeout-minutes: 180
     steps:
@@ -122,7 +196,7 @@ jobs:
             --target x86_64-unknown-linux-musl
           gzip --best --stdout \
             target/x86_64-unknown-linux-musl/release/remote_server \
-            > target/zed-remote-server-linux-x86_64.gz
+            > "target/zed-rp-stable-${{ needs.metadata.outputs.version }}-remote-server-linux-x86_64.gz"
 
       - name: Show sccache statistics
         if: always()
@@ -131,67 +205,128 @@ jobs:
       - name: Upload Linux remote server
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: linux-remote-server-x86_64
-          path: target/zed-remote-server-linux-x86_64.gz
+          name: rp-package-linux-x86_64-${{ needs.metadata.outputs.version }}
+          path: target/zed-rp-stable-${{ needs.metadata.outputs.version }}-remote-server-linux-x86_64.gz
           if-no-files-found: error
           retention-days: 30
 
   assemble:
     name: Assemble release assets
     needs:
+      - metadata
       - package_windows
       - package_linux_remote_server
+    if: >-
+      github.repository == 'JonathonRP/zed' &&
+      github.ref == 'refs/heads/release/rp-stable'
     runs-on: ubuntu-22.04
     steps:
+      - name: Checkout manifest tooling
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
       - name: Download packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          pattern: "*-x86_64"
+          pattern: rp-package-*-${{ needs.metadata.outputs.version }}
           path: dist
           merge-multiple: true
 
-      - name: Generate SHA-256 manifest
-        working-directory: dist
-        run: sha256sum * > SHA256SUMS
+      - name: Download RP release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rp-release-metadata-${{ needs.metadata.outputs.version }}
+          path: metadata
+
+      - name: Finalize release manifests
+        run: |
+          version="${{ needs.metadata.outputs.version }}"
+          cp metadata/rp-release-manifest.json \
+            "dist/rp-release-manifest-${version}.json"
+          cp metadata/release-notes.md \
+            "dist/RP-Fork-Release-Notes-${version}.md"
+          python3 script/rp_release_metadata.py \
+            --finalize-manifest metadata/rp-release-manifest.json \
+            --dist dist \
+            --repository "$GITHUB_REPOSITORY" \
+            --output-file dist/rp-update.json
+          (
+            cd dist
+            sha256sum * > SHA256SUMS
+          )
 
       - name: Upload release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: fork-stable-${{ github.sha }}
+          name: fork-stable-${{ needs.metadata.outputs.version }}
           path: dist/*
           if-no-files-found: error
           retention-days: 30
 
   publish:
     name: Publish GitHub Release
-    needs: assemble
+    needs:
+      - metadata
+      - assemble
     if: >-
       github.repository == 'JonathonRP/zed' &&
+      github.ref == 'refs/heads/release/rp-stable' &&
       (github.event_name == 'push' ||
       (github.event_name == 'workflow_dispatch' && inputs.publish_release))
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
+      - name: Checkout release history
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
       - name: Download release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: fork-stable-${{ github.sha }}
+          name: fork-stable-${{ needs.metadata.outputs.version }}
           path: dist
 
-      - name: Create or update release
+      - name: Download RP release notes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rp-release-metadata-${{ needs.metadata.outputs.version }}
+          path: metadata
+
+      - name: Create or verify immutable release
         env:
           GH_TOKEN: ${{ github.token }}
+          RP_TAG: ${{ needs.metadata.outputs.tag }}
+          RP_VERSION: ${{ needs.metadata.outputs.version }}
+          RP_REUSED: ${{ needs.metadata.outputs.reused }}
         run: |
-          tag="rp-stable-${GITHUB_SHA::7}"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* \
-              --clobber \
+          title="RP Fork Release Notes ${RP_VERSION}"
+          if gh release view "$RP_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/${RP_TAG}:refs/tags/${RP_TAG}"
+            tag_sha="$(git rev-list -n 1 "refs/tags/${RP_TAG}")"
+            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "::error::Published RP tag ${RP_TAG} points to ${tag_sha}, not ${GITHUB_SHA}"
+              exit 1
+            fi
+            mkdir published-dist
+            gh release download "$RP_TAG" \
+              --dir published-dist \
               --repo "$GITHUB_REPOSITORY"
+            python3 script/rp_release_metadata.py \
+              --verify-published-assets dist \
+              --published-assets published-dist
+            echo "Published RP release ${RP_TAG} is byte-identical; leaving it unchanged."
+          elif [[ "$RP_REUSED" == "true" ]]; then
+            gh release create "$RP_TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "$title" \
+              --notes-file metadata/release-notes.md
           else
-            gh release create "$tag" dist/* \
+            gh release create "$RP_TAG" dist/* \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "RP fork stable ${GITHUB_SHA::7}" \
-              --notes "Unsigned stable-channel Windows package and matching Linux musl remote server built from ${GITHUB_SHA}."
+              --title "$title" \
+              --notes-file metadata/release-notes.md
           fi
