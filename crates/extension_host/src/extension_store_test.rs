@@ -7,7 +7,7 @@ use crate::{
         ExtensionVersion, HeadlessExtensionStore, LoadedExtension, STALE_UPLOAD_TTL,
         hash_directory_contents, remove_stale_uploads,
     },
-    load_plugin_queries, remote_sync_retry_delay,
+    load_plugin_queries, remote_sync_retry_delay, remove_rp_staging_artifacts, restore_rp_backup,
 };
 use async_compression::futures::bufread::GzipEncoder;
 use async_trait::async_trait;
@@ -46,6 +46,7 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
+
 use task::{SpawnInTerminal, ZedDebugConfig};
 use theme::ThemeRegistry;
 use util::{rel_path::rel_path_buf, test::TempTree};
@@ -54,6 +55,82 @@ use util::{rel_path::rel_path_buf, test::TempTree};
 #[ctor::ctor(unsafe)]
 fn init_logger() {
     zlog::init_test();
+}
+
+#[gpui::test]
+async fn rp_backup_restore_preserves_previous_install(executor: BackgroundExecutor) {
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        "/extensions",
+        json!({
+            "installed": {
+                "example": {
+                    "marker": "failed"
+                }
+            },
+            "staging": {
+                ".rp-backup-example": {
+                    "marker": "working"
+                }
+            }
+        }),
+    )
+    .await;
+    let installed_dir = PathBuf::from("/extensions/installed/example");
+    let staging_dir = PathBuf::from("/extensions/staging");
+    let backup_dir = staging_dir.join(".rp-backup-example");
+    let fs: Arc<dyn Fs> = fs;
+
+    let failed_dir = restore_rp_backup(&fs, &installed_dir, &backup_dir, &staging_dir)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fs.load(&installed_dir.join("marker")).await.unwrap(),
+        "working"
+    );
+    assert!(fs.metadata(&backup_dir).await.unwrap().is_none());
+    assert_eq!(fs.load(&failed_dir.join("marker")).await.unwrap(), "failed");
+}
+
+#[gpui::test]
+async fn rp_uninstall_removes_only_its_staging_artifacts(executor: BackgroundExecutor) {
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        "/extensions/staging",
+        json!({
+            ".rp-backup-example": {},
+            ".rp-failed-example-123-0": {},
+            ".rp-backup-other": {},
+            ".rp-failed-other-123-0": {}
+        }),
+    )
+    .await;
+    let fs: Arc<dyn Fs> = fs;
+    let staging_dir = Path::new("/extensions/staging");
+
+    remove_rp_staging_artifacts(&fs, staging_dir, "example")
+        .await
+        .unwrap();
+
+    assert!(
+        fs.metadata(&staging_dir.join(".rp-backup-example"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fs.metadata(&staging_dir.join(".rp-failed-example-123-0"))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fs.metadata(&staging_dir.join(".rp-backup-other"))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[gpui::test]
