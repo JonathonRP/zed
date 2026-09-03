@@ -1,12 +1,13 @@
 mod capability_granter;
 pub mod extension_settings;
 pub mod headless_host;
+mod rp_extension_catalog;
 pub mod wasm_host;
 
 #[cfg(test)]
 mod extension_store_test;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_compression::futures::bufread::GzipDecoder;
 use async_tar::Archive;
 use client::{Client, proto, telemetry::Telemetry};
@@ -49,12 +50,13 @@ use settings::{SemanticTokenRules, Settings, SettingsStore};
 use std::ops::RangeInclusive;
 use std::str::FromStr;
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::{
     borrow::Cow,
     cmp::Ordering,
     path::{self, Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use task::TaskTemplates;
 use url::Url;
@@ -68,6 +70,9 @@ pub use extension::{
     ExtensionLibraryKind, GrammarManifestEntry, OldExtensionManifest, SchemaVersion,
 };
 pub use extension_settings::ExtensionSettings;
+
+use crate::headless_host::hash_directory_contents;
+use crate::rp_extension_catalog::RpExtensionCatalogClient;
 
 pub const RELOAD_DEBOUNCE_DURATION: Duration = Duration::from_millis(200);
 const FS_WATCH_LATENCY: Duration = Duration::from_millis(100);
@@ -134,8 +139,7 @@ pub struct ExtensionStore {
     pub fs: Arc<dyn Fs>,
     pub http_client: Arc<HttpClientWithUrl>,
     pub telemetry: Option<Arc<Telemetry>>,
-    pub reload_tx: UnboundedSender<Option<Arc<str>>>,
-    pub reload_complete_senders: Vec<oneshot::Sender<()>>,
+    pub reload_tx: UnboundedSender<ReloadRequest>,
     pub installed_dir: PathBuf,
     pub staging_dir: PathBuf,
     pub outstanding_operations: BTreeMap<Arc<str>, ExtensionOperation>,
@@ -146,6 +150,110 @@ pub struct ExtensionStore {
     pub tasks: Vec<Task<()>>,
     pub remote_clients: Vec<WeakEntity<RemoteClient>>,
     pub ssh_registered_tx: UnboundedSender<()>,
+    rp_catalog: Option<Arc<RpExtensionCatalogClient>>,
+}
+
+type ReloadRequest = (Option<Arc<str>>, Option<oneshot::Sender<()>>);
+
+async fn restore_rp_backup(
+    fs: &Arc<dyn Fs>,
+    extension_dir: &Path,
+    backup_dir: &Path,
+    staging_dir: &Path,
+) -> Result<PathBuf> {
+    static QUARANTINE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+    fs.create_dir(staging_dir).await?;
+    let extension_name = extension_dir
+        .file_name()
+        .context("RP extension install path has no file name")?;
+    let failed_dir = staging_dir.join(format!(
+        ".rp-failed-{}-{}-{}",
+        extension_name.to_string_lossy(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        QUARANTINE_NONCE.fetch_add(1, AtomicOrdering::Relaxed)
+    ));
+    fs.rename(
+        extension_dir,
+        &failed_dir,
+        RenameOptions {
+            overwrite: false,
+            ignore_if_exists: false,
+            create_parents: true,
+        },
+    )
+    .await
+    .context("quarantining failed RP extension install")?;
+
+    if let Err(error) = fs
+        .rename(
+            backup_dir,
+            extension_dir,
+            RenameOptions {
+                overwrite: false,
+                ignore_if_exists: false,
+                create_parents: true,
+            },
+        )
+        .await
+    {
+        if let Err(restore_error) = fs
+            .rename(
+                &failed_dir,
+                extension_dir,
+                RenameOptions {
+                    overwrite: false,
+                    ignore_if_exists: false,
+                    create_parents: true,
+                },
+            )
+            .await
+        {
+            log::error!(
+                "failed to restore the rejected RP install after backup recovery failed: {restore_error:#}"
+            );
+        }
+        return Err(error).context("restoring previous RP extension install");
+    }
+
+    Ok(failed_dir)
+}
+
+async fn remove_rp_staging_artifacts(
+    fs: &Arc<dyn Fs>,
+    staging_dir: &Path,
+    extension_id: &str,
+) -> Result<()> {
+    let backup_name = format!(".rp-backup-{extension_id}");
+    let failed_prefix = format!(".rp-failed-{extension_id}-");
+    if fs.metadata(staging_dir).await?.is_none() {
+        return Ok(());
+    }
+    let mut entries = fs
+        .read_dir(staging_dir)
+        .await
+        .context("reading RP extension staging directory")?;
+    while let Some(entry) = entries.next().await {
+        let entry = entry.context("reading RP extension staging directory")?;
+        let Some(name) = entry.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name == backup_name || name.starts_with(&failed_prefix) {
+            fs.remove_dir(
+                &entry,
+                RemoveOptions {
+                    recursive: true,
+                    ignore_if_not_exists: true,
+                },
+            )
+            .await
+            .with_context(|| format!("removing RP extension staging artifact {entry:?}"))?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -320,6 +428,13 @@ impl ExtensionStore {
         let installed_dir = extensions_dir.join("installed");
         let staging_dir = extensions_dir.join("staging");
         let index_path = extensions_dir.join("index.json");
+        let rp_catalog = rp_extension_catalog::is_enabled().then(|| {
+            Arc::new(RpExtensionCatalogClient::new(
+                &extensions_dir,
+                fs.clone(),
+                http_client.clone(),
+            ))
+        });
 
         let (reload_tx, mut reload_rx) = unbounded();
         let (connection_registered_tx, mut connection_registered_rx) = unbounded();
@@ -332,7 +447,6 @@ impl ExtensionStore {
             builder: Arc::new(ExtensionBuilder::new(builder_client, build_dir)),
             outstanding_operations: Default::default(),
             modified_extensions: Default::default(),
-            reload_complete_senders: Vec::new(),
             wasm_host: WasmHost::new(
                 fs.clone(),
                 http_client.clone(),
@@ -350,6 +464,7 @@ impl ExtensionStore {
 
             remote_clients: Default::default(),
             ssh_registered_tx: connection_registered_tx,
+            rp_catalog,
         };
 
         // The extensions store maintains an index file, which contains a complete
@@ -409,6 +524,7 @@ impl ExtensionStore {
                 load_initial_extensions.await;
 
                 let mut index_changed = false;
+                let mut reload_complete_senders: Vec<oneshot::Sender<()>> = Vec::new();
                 let mut debounce_timer = cx.background_spawn(futures::future::pending()).fuse();
 
                 loop {
@@ -421,6 +537,9 @@ impl ExtensionStore {
                                 this.update(cx, |this, cx| this.extensions_updated(index, cx))?
                                     .await;
                                 index_changed = false;
+                                for sender in reload_complete_senders.drain(..) {
+                                    sender.send(()).ok();
+                                }
                             }
 
                             Self::update_remote_clients(&this, cx).await?;
@@ -428,11 +547,12 @@ impl ExtensionStore {
                         _ = connection_registered_rx.next() => {
                             debounce_timer = cx.background_executor().timer(RELOAD_DEBOUNCE_DURATION).fuse()
                         }
-                        extension_id = reload_rx.next() => {
-                            let Some(extension_id) = extension_id else { break; };
+                        request = reload_rx.next() => {
+                            let Some((extension_id, complete_sender)) = request else { break; };
                             this.update(cx, |this, _cx| {
                                 this.modified_extensions.extend(extension_id);
                             })?;
+                            reload_complete_senders.extend(complete_sender);
                             index_changed = true;
                             debounce_timer = cx.background_executor().timer(RELOAD_DEBOUNCE_DURATION).fuse()
                         }
@@ -464,7 +584,9 @@ impl ExtensionStore {
                             event_path.components().next()
                             && let Some(extension_id) = extension_dir_name.to_str()
                         {
-                            reload_tx.unbounded_send(Some(extension_id.into())).ok();
+                            reload_tx
+                                .unbounded_send((Some(extension_id.into()), None))
+                                .ok();
                         }
                     }
                 }
@@ -480,9 +602,8 @@ impl ExtensionStore {
         cx: &mut Context<Self>,
     ) -> impl Future<Output = ()> + use<> {
         let (tx, rx) = oneshot::channel();
-        self.reload_complete_senders.push(tx);
         self.reload_tx
-            .unbounded_send(modified_extension)
+            .unbounded_send((modified_extension, Some(tx)))
             .expect("reload task exited");
         cx.emit(Event::StartedReloading);
 
@@ -580,6 +701,23 @@ impl ExtensionStore {
         provides_filter: Option<&BTreeSet<ExtensionProvides>>,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
+        if let Some(catalog) = self.rp_catalog.clone() {
+            let search = search.map(str::to_string);
+            let provides_filter = provides_filter.cloned();
+            let release_channel = ReleaseChannel::global(cx);
+            return cx.background_spawn(async move {
+                catalog
+                    .list(search.as_deref(), provides_filter.as_ref())
+                    .await
+                    .map(|mut extensions| {
+                        extensions.retain(|extension| {
+                            !SUPPRESSED_EXTENSIONS.contains(extension.id.as_ref())
+                                && is_version_compatible(release_channel, extension)
+                        });
+                        extensions
+                    })
+            });
+        }
         let version = CURRENT_SCHEMA_VERSION.to_string();
         let mut query = vec![("max_schema_version", version.as_str())];
         if let Some(search) = search {
@@ -604,6 +742,24 @@ impl ExtensionStore {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
+        if let Some(catalog) = self.rp_catalog.clone() {
+            let extension_settings = ExtensionSettings::get_global(cx);
+            let release_channel = ReleaseChannel::global(cx);
+            let installed = self
+                .extension_index
+                .extensions
+                .iter()
+                .filter(|(id, entry)| !entry.dev && extension_settings.should_auto_update(id))
+                .map(|(id, entry)| (id.clone(), entry.manifest.version.clone()))
+                .collect::<Vec<_>>();
+            return cx.background_spawn(async move {
+                catalog.updates(&installed).await.map(|mut extensions| {
+                    extensions
+                        .retain(|extension| is_version_compatible(release_channel, extension));
+                    extensions
+                })
+            });
+        }
         let schema_versions = schema_version_range();
         let wasm_api_versions = wasm_api_version_range(ReleaseChannel::global(cx));
         let extension_settings = ExtensionSettings::get_global(cx);
@@ -652,6 +808,17 @@ impl ExtensionStore {
         extension_id: &str,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<ExtensionMetadata>>> {
+        if let Some(catalog) = self.rp_catalog.clone() {
+            let extension_id = extension_id.to_string();
+            let release_channel = ReleaseChannel::global(cx);
+            return cx.background_spawn(async move {
+                catalog.versions(&extension_id).await.map(|mut extensions| {
+                    extensions
+                        .retain(|extension| is_version_compatible(release_channel, extension));
+                    extensions
+                })
+            });
+        }
         self.fetch_extensions_from_api(&format!("/extensions/{extension_id}"), &[], cx)
     }
 
@@ -888,8 +1055,326 @@ impl ExtensionStore {
         })
     }
 
+    fn install_or_upgrade_rp_extension(
+        &mut self,
+        extension_id: Arc<str>,
+        version: Arc<str>,
+        operation: ExtensionOperation,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        let Some(catalog) = self.rp_catalog.clone() else {
+            return Task::ready(Err(anyhow!("RP extension catalog is unavailable")));
+        };
+        let extension_dir = self.installed_dir.join(extension_id.as_ref());
+        let backup_dir = self
+            .staging_dir
+            .join(format!(".rp-backup-{}", extension_id));
+        let staging_dir = self.staging_dir.clone();
+        let fs = self.fs.clone();
+        let release_channel = ReleaseChannel::global(cx);
+
+        match self.outstanding_operations.entry(extension_id.clone()) {
+            btree_map::Entry::Occupied(_) => return Task::ready(Ok(())),
+            btree_map::Entry::Vacant(entry) => entry.insert(operation),
+        };
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let _finish = cx.on_drop(&this, {
+                let extension_id = extension_id.clone();
+                move |this, cx| {
+                    this.outstanding_operations.remove(extension_id.as_ref());
+                    cx.notify();
+                }
+            });
+
+            let (package, catalog_identity) = catalog.package(&extension_id, &version).await?;
+            let replacing_existing = fs.metadata(&extension_dir).await?.is_some();
+            catalog.authorize(&package, replacing_existing).await?;
+
+            if fs.metadata(&backup_dir).await?.is_some() {
+                if replacing_existing {
+                    let installed_version =
+                        ExtensionManifest::load(fs.clone(), &extension_dir)
+                            .await
+                            .ok()
+                            .map(|manifest| manifest.version);
+                    let install_is_recorded = if let Some(installed_version) = installed_version {
+                        catalog
+                            .has_recorded_install(&extension_id, &installed_version)
+                            .await?
+                    } else {
+                        false
+                    };
+                    if !install_is_recorded {
+                        let failed_dir = restore_rp_backup(
+                            &fs,
+                            &extension_dir,
+                            &backup_dir,
+                            &staging_dir,
+                        )
+                        .await
+                        .context("recovering interrupted RP extension rollback")?;
+                        this.update(cx, |this, cx| {
+                            this.reload(Some(extension_id.clone()), cx)
+                        })?
+                        .await;
+                        fs.remove_dir(
+                            &failed_dir,
+                            RemoveOptions {
+                                recursive: true,
+                                ignore_if_not_exists: true,
+                            },
+                        )
+                        .await
+                        .context("removing recovered RP extension quarantine")?;
+                        bail!(
+                            "recovered interrupted RP extension update; retry the requested operation"
+                        );
+                    }
+                    fs.remove_dir(
+                        &backup_dir,
+                        RemoveOptions {
+                            recursive: true,
+                            ignore_if_not_exists: true,
+                        },
+                    )
+                    .await
+                    .context("removing completed RP extension backup")?;
+                } else {
+                    fs.rename(
+                        &backup_dir,
+                        &extension_dir,
+                        RenameOptions {
+                            overwrite: false,
+                            ignore_if_exists: false,
+                            create_parents: true,
+                        },
+                    )
+                    .await
+                    .context("recovering interrupted RP extension swap")?;
+                    bail!(
+                        "recovered interrupted RP extension update; retry the requested operation"
+                    );
+                }
+            }
+
+            let archive_bytes = catalog.download(&package).await?;
+            rp_extension_catalog::validate_archive_paths(&archive_bytes).await?;
+
+            fs.create_dir(&staging_dir).await?;
+            let temporary_dir =
+                tempfile::tempdir_in(&staging_dir).context("creating RP extension staging dir")?;
+            let staged_extension_dir = temporary_dir.path().join(extension_id.as_ref());
+            fs.create_dir(&staged_extension_dir).await?;
+            let decoder = GzipDecoder::new(BufReader::new(archive_bytes.as_slice()));
+            Archive::new(decoder)
+                .unpack(&staged_extension_dir)
+                .await
+                .context("extracting validated RP extension archive")?;
+
+            let staged_manifest =
+                ExtensionManifest::load(fs.clone(), &staged_extension_dir).await?;
+            ensure!(
+                staged_manifest.id.as_ref() == extension_id.as_ref()
+                    && staged_manifest.version.as_ref() == version.as_ref(),
+                "staged RP extension manifest identity mismatch"
+            );
+            ensure!(
+                staged_manifest.schema_version.0 as i32 == package.schema_version,
+                "staged RP extension schema version mismatch"
+            );
+            let staged_wasm_api_version = staged_manifest
+                .lib
+                .version
+                .as_ref()
+                .map(ToString::to_string);
+            ensure!(
+                staged_wasm_api_version == package.wasm_api_version,
+                "staged RP extension Wasm API version mismatch"
+            );
+            let staged_metadata = ExtensionMetadata {
+                id: staged_manifest.id.clone(),
+                manifest: cloud_api_types::ExtensionApiManifest {
+                    name: staged_manifest.name.to_string(),
+                    version: staged_manifest.version.clone(),
+                    description: staged_manifest.description.as_deref().map(str::to_string),
+                    authors: staged_manifest
+                        .authors
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect(),
+                    repository: staged_manifest
+                        .repository
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_string(),
+                    schema_version: Some(staged_manifest.schema_version.0 as i32),
+                    wasm_api_version: staged_wasm_api_version,
+                    provides: staged_manifest.provides(),
+                },
+                published_at: chrono::Utc::now(),
+                download_count: 0,
+            };
+            ensure!(
+                is_version_compatible(release_channel, &staged_metadata),
+                "staged RP extension is incompatible with this Zed build"
+            );
+
+            let had_previous = fs.metadata(&extension_dir).await?.is_some();
+            if had_previous {
+                fs.rename(
+                    &extension_dir,
+                    &backup_dir,
+                    RenameOptions {
+                        overwrite: false,
+                        ignore_if_exists: false,
+                        create_parents: true,
+                    },
+                )
+                .await
+                .context("backing up installed extension before RP update")?;
+            }
+
+            if let Err(error) = fs
+                .rename(
+                    &staged_extension_dir,
+                    &extension_dir,
+                    RenameOptions {
+                        overwrite: false,
+                        ignore_if_exists: false,
+                        create_parents: true,
+                    },
+                )
+                .await
+            {
+                if had_previous {
+                    fs.rename(
+                        &backup_dir,
+                        &extension_dir,
+                        RenameOptions {
+                            overwrite: false,
+                            ignore_if_exists: false,
+                            create_parents: true,
+                        },
+                    )
+                    .await
+                    .context("restoring extension after failed RP swap")?;
+                }
+                return Err(error).context("committing staged RP extension");
+            }
+
+            this.update(cx, |this, cx| this.reload(Some(extension_id.clone()), cx))?
+                .await;
+            let loaded = this.update(cx, |this, _cx| {
+                this.extension_manifest_for_id(&extension_id)
+                    .is_some_and(|manifest| {
+                        manifest.id == extension_id
+                            && manifest.version == version
+                            && (manifest.lib.kind.is_none()
+                                || this.wasm_extensions.iter().any(|(loaded, _)| {
+                                    loaded.id == extension_id && loaded.version == version
+                                }))
+                    })
+            })?;
+            let commit_result = if loaded {
+                catalog.record_install(&package, &catalog_identity).await
+            } else {
+                Err(anyhow!("RP extension failed post-install validation"))
+            };
+
+            if let Err(error) = commit_result {
+                let failed_dir = if had_previous {
+                    Some(
+                        restore_rp_backup(&fs, &extension_dir, &backup_dir, &staging_dir)
+                            .await
+                            .context("rolling back failed RP extension install")?,
+                    )
+                } else {
+                    fs.remove_dir(
+                        &extension_dir,
+                        RemoveOptions {
+                            recursive: true,
+                            ignore_if_not_exists: true,
+                        },
+                    )
+                    .await
+                    .context("removing failed RP extension install")?;
+                    None
+                };
+                this.update(cx, |this, cx| this.reload(Some(extension_id.clone()), cx))?
+                    .await;
+                if let Some(failed_dir) = failed_dir
+                    && let Err(cleanup_error) = fs
+                        .remove_dir(
+                            &failed_dir,
+                            RemoveOptions {
+                                recursive: true,
+                                ignore_if_not_exists: true,
+                            },
+                        )
+                        .await
+                {
+                    log::warn!(
+                        "failed to remove rolled-back RP extension quarantine {failed_dir:?}: {cleanup_error:#}"
+                    );
+                }
+                return Err(error);
+            }
+
+            if had_previous {
+                fs.remove_dir(
+                    &backup_dir,
+                    RemoveOptions {
+                        recursive: true,
+                        ignore_if_not_exists: true,
+                    },
+                )
+                .await
+                .context("removing RP extension backup after durable success")?;
+            }
+
+            if let ExtensionOperation::Install = operation {
+                this.update(cx, |this, cx| {
+                    cx.emit(Event::ExtensionInstalled(extension_id.clone()));
+                    if let Some(events) = ExtensionEvents::try_global(cx)
+                        && let Some(manifest) = this.extension_manifest_for_id(&extension_id)
+                    {
+                        events.update(cx, |this, cx| {
+                            this.emit(extension::Event::ExtensionInstalled(manifest.clone()), cx)
+                        });
+                    }
+                })?;
+            }
+
+            Ok(())
+        })
+    }
+
     pub fn install_latest_extension(&mut self, extension_id: Arc<str>, cx: &mut Context<Self>) {
         log::info!("installing extension {extension_id} latest version");
+
+        if let Some(catalog) = self.rp_catalog.clone() {
+            let release_channel = ReleaseChannel::global(cx);
+            cx.spawn(async move |this, cx| {
+                let latest = catalog.latest(&extension_id).await?;
+                ensure!(
+                    is_version_compatible(release_channel, &latest),
+                    "latest RP extension is incompatible with this Zed build"
+                );
+                this.update(cx, |this, cx| {
+                    this.install_or_upgrade_extension(
+                        extension_id,
+                        latest.manifest.version,
+                        ExtensionOperation::Install,
+                        cx,
+                    )
+                })?
+                .await
+            })
+            .detach_and_log_err(cx);
+            return;
+        }
 
         let schema_versions = schema_version_range();
         let wasm_api_versions = wasm_api_version_range(ReleaseChannel::global(cx));
@@ -939,6 +1424,9 @@ impl ExtensionStore {
         cx: &mut Context<Self>,
     ) -> Task<Result<()>> {
         log::info!("installing extension {extension_id} {version}");
+        if self.rp_catalog.is_some() {
+            return self.install_or_upgrade_rp_extension(extension_id, version, operation, cx);
+        }
         let Some(url) = self
             .http_client
             .build_zed_api_url(
@@ -960,7 +1448,9 @@ impl ExtensionStore {
     ) -> Task<Result<()>> {
         let extension_dir = self.installed_dir.join(extension_id.as_ref());
         let work_dir = self.wasm_host.work_dir.join(extension_id.as_ref());
+        let staging_dir = self.staging_dir.clone();
         let fs = self.fs.clone();
+        let rp_catalog = self.rp_catalog.clone();
 
         let extension_manifest = self.extension_manifest_for_id(&extension_id).cloned();
 
@@ -978,6 +1468,9 @@ impl ExtensionStore {
                 }
             });
 
+            if rp_catalog.is_some() {
+                remove_rp_staging_artifacts(&fs, &staging_dir, &extension_id).await?;
+            }
             fs.remove_dir(
                 &extension_dir,
                 RemoveOptions {
@@ -991,6 +1484,13 @@ impl ExtensionStore {
             extension_store
                 .update(cx, |extension_store, cx| extension_store.reload(None, cx))?
                 .await;
+            if let Some(rp_catalog) = rp_catalog {
+                if let Err(error) = rp_catalog.forget_install(&extension_id).await {
+                    log::error!(
+                        "extension {extension_id} was removed, but its RP provenance could not be cleared: {error:#}"
+                    );
+                }
+            }
 
             // There's a race between wasm extension fully stopping and the directory removal.
             // On Windows, it's impossible to remove a directory that has a process running in it.
@@ -1237,7 +1737,6 @@ impl ExtensionStore {
             };
 
         if extensions_to_load.is_empty() && extensions_to_unload.is_empty() {
-            self.reload_complete_senders.clear();
             trigger_suppressed_extension_removal(self, cx);
             return Task::ready(());
         }
@@ -1520,8 +2019,6 @@ impl ExtensionStore {
             }
 
             this.update(cx, |this, cx| {
-                this.reload_complete_senders.clear();
-
                 for (manifest, wasm_extension) in &wasm_extensions {
                     let extension = Arc::new(wasm_extension.clone());
 
