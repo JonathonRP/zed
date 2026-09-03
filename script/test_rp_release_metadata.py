@@ -8,6 +8,7 @@ from rp_release_metadata import (
     allocate_calendar_version,
     finalize_update_manifest,
     release_asset_names,
+    verify_published_assets,
 )
 
 
@@ -131,6 +132,49 @@ class FinalizeUpdateManifestTests(unittest.TestCase):
                     ),
                 },
             )
+
+
+class VerifyPublishedAssetsTests(unittest.TestCase):
+    def test_identical_published_release_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            expected = root / "expected"
+            published = root / "published"
+            expected.mkdir()
+            published.mkdir()
+            for directory in (expected, published):
+                (directory / "asset.zip").write_bytes(b"same bytes")
+                (directory / "rp-update.json").write_bytes(b"same manifest")
+
+            verify_published_assets(expected, published)
+
+    def test_changed_published_release_fails(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            expected = root / "expected"
+            published = root / "published"
+            expected.mkdir()
+            published.mkdir()
+            (expected / "asset.zip").write_bytes(b"new bytes")
+            (published / "asset.zip").write_bytes(b"published bytes")
+
+            with self.assertRaisesRegex(
+                MetadataError, "published RP release is immutable"
+            ):
+                verify_published_assets(expected, published)
+
+    def test_changed_asset_set_fails(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = pathlib.Path(temporary_directory)
+            expected = root / "expected"
+            published = root / "published"
+            expected.mkdir()
+            published.mkdir()
+            (expected / "asset.zip").write_bytes(b"bytes")
+            (published / "other.zip").write_bytes(b"bytes")
+
+            with self.assertRaisesRegex(MetadataError, "missing published assets"):
+                verify_published_assets(expected, published)
 
 
 if __name__ == "__main__":
