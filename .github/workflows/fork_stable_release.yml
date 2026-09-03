@@ -104,6 +104,7 @@ jobs:
           @(
             "SCCACHE_PATH=$sccachePath"
             "RUSTC_WRAPPER=$sccachePath"
+            "CARGO_BUILD_RUSTC_WRAPPER=$sccachePath"
           ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Select stable channel
@@ -114,6 +115,7 @@ jobs:
         shell: pwsh
         env:
           RP_VERSION: ${{ needs.metadata.outputs.version }}
+          ZED_REQUIRE_SCCACHE: "1"
           ZED_CLIENT_CHECKSUM_SEED: fork-unsigned-stable
         run: |
           $metadataPath = "target/rp-release-metadata/rp-release-manifest.json"
@@ -135,6 +137,13 @@ jobs:
           } finally {
             $bundleStopwatch.Stop()
             Write-Host "RP Windows bundle elapsed: $($bundleStopwatch.Elapsed)"
+          }
+          $sccacheStats = (
+            & $env:SCCACHE_PATH --show-stats --stats-format json |
+              ConvertFrom-Json
+          )
+          if ($sccacheStats.stats.compile_requests -le 1) {
+            throw "RP Windows build bypassed sccache after the controlled probe"
           }
           Compress-Archive `
             -Path inno/x86_64/* `
