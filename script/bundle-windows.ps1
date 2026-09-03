@@ -79,8 +79,53 @@ if (-not $vsDevShell) {
 }
 
 Push-Location
+$requiredRustcWrapper = $env:RUSTC_WRAPPER
 & $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
 Pop-Location
+if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
+    if ([string]::IsNullOrWhiteSpace($requiredRustcWrapper)) {
+        throw "ZED_REQUIRE_SCCACHE requires RUSTC_WRAPPER"
+    }
+    if (-not (Test-Path -LiteralPath $requiredRustcWrapper -PathType Leaf)) {
+        throw "RUSTC_WRAPPER does not resolve to the required sccache executable"
+    }
+
+    # The VS developer shell may replace the process environment. Reassert the
+    # action-provided wrapper before any Cargo process starts.
+    $env:RUSTC_WRAPPER = $requiredRustcWrapper
+    $env:CARGO_BUILD_RUSTC_WRAPPER = $requiredRustcWrapper
+    $env:SCCACHE_PATH = $requiredRustcWrapper
+
+    Write-Host "RP Windows sccache wrapper: $requiredRustcWrapper"
+    & $requiredRustcWrapper --version
+    & $requiredRustcWrapper --zero-stats
+
+    $probeDir = Join-Path $env:RUNNER_TEMP "rp-sccache-probe"
+    New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
+    $probeSource = Join-Path $probeDir "probe.rs"
+    $probeOutput = Join-Path $probeDir "librp_sccache_probe.rmeta"
+    "pub fn rp_sccache_probe() -> u32 { 42 }" |
+        Set-Content -LiteralPath $probeSource -Encoding utf8
+    $rustcPath = (Get-Command rustc -ErrorAction Stop).Source
+    & $requiredRustcWrapper $rustcPath `
+        --crate-name rp_sccache_probe `
+        --crate-type lib `
+        --emit metadata `
+        --out-dir $probeDir `
+        $probeSource
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $probeOutput -PathType Leaf)) {
+        throw "RP Windows sccache probe failed"
+    }
+
+    $probeStats = (
+        & $requiredRustcWrapper --show-stats --stats-format json |
+            ConvertFrom-Json
+    )
+    if ($probeStats.stats.compile_requests -lt 1 -or $probeStats.stats.requests_executed -lt 1) {
+        throw "RP Windows sccache probe did not register a compile request"
+    }
+    & $requiredRustcWrapper --show-stats
+}
 
 Push-Location -Path crates/zed
 $channel = Get-Content "RELEASE_CHANNEL"
