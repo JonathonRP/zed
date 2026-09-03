@@ -106,7 +106,7 @@ Assert-Matches $installer '(?s)#ifdef RpPackage\s+AppPublisher=JonathonRP.*?AppP
     "RP publisher URLs must be fork-owned without changing official values"
 Assert-Matches $installer '(?s)#ifdef RpPackage\s+ChangesEnvironment=false\s+ChangesAssociations=false\s+#else\s+ChangesEnvironment=true\s+ChangesAssociations=true\s+#endif' `
     "RP integration change flags must be disabled"
-Assert-Matches $installer '(?s)PrivilegesRequired=lowest\s+#ifdef RpPackage\s+UsePreviousAppDir=yes\s+PrivilegesRequiredOverridesAllowed=none\s+#endif' `
+Assert-Matches $installer '(?s)PrivilegesRequired=lowest\s+#ifdef RpPackage\s+UsePreviousAppDir=yes\s+#endif' `
     "RP privilege and previous directory policy is missing"
 Assert-Matches $installer '(?s)\[Tasks\]\s+Name: "desktopicon".*?#ifndef RpPackage.*?Name: "addcontextmenufiles".*?Name: "associatewithfiles".*?Name: "addtopath".*?#endif' `
     "RP integration tasks must be guarded"
@@ -119,6 +119,9 @@ Assert-Matches $installer '(?s)AppId=\{#AppId\}.*?AppVerName=\{#AppDisplayName\}
 
 $rpInstaller = Resolve-RpGuards $installer $true
 $officialInstaller = Resolve-RpGuards $installer $false
+if ($rpInstaller -match 'PrivilegesRequiredOverridesAllowed\s*=\s*(commandline|dialog)') {
+    throw "RP installer must not allow privilege overrides"
+}
 foreach ($integration in @(
     'Name: "associatewithfiles"',
     'Name: "addcontextmenufiles"',
