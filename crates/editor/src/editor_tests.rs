@@ -53,8 +53,9 @@ use serde_json::{self, json};
 use settings::{
     AllLanguageSettingsContent, DelayMs, EditorSettingsContent, GlobalLspSettingsContent,
     GoToDefinitionScrollStrategy, IndentGuideBackgroundColoring, IndentGuideColoring,
-    InlayHintSettingsContent, LspDocumentColorInlayShape, ProjectSettingsContent,
-    ScrollBeyondLastLine, SearchSettingsContent, SettingsContent, SettingsStore,
+    InlayHintSettingsContent, LspDocumentColorInlayPosition, LspDocumentColorInlayShape,
+    ProjectSettingsContent, ScrollBeyondLastLine, SearchSettingsContent, SettingsContent,
+    SettingsStore,
 };
 use std::{
     borrow::Cow,
@@ -82,6 +83,28 @@ fn display_ranges(editor: &Editor, cx: &mut Context<'_, Editor>) -> Vec<Range<Di
     editor
         .selections
         .display_ranges(&editor.display_snapshot(cx))
+}
+
+#[gpui::test]
+fn test_lsp_document_color_inlay_position_setting(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    assert_eq!(
+        LspDocumentColorInlayPosition::default(),
+        LspDocumentColorInlayPosition::Before
+    );
+    assert_eq!(
+        cx.update(|cx| EditorSettings::get_global(cx).lsp_document_color_inlay_position),
+        LspDocumentColorInlayPosition::After
+    );
+
+    update_test_editor_settings(cx, &|settings| {
+        settings.lsp_document_color_inlay_position = Some(LspDocumentColorInlayPosition::Before);
+    });
+
+    assert_eq!(
+        cx.update(|cx| EditorSettings::get_global(cx).lsp_document_color_inlay_position),
+        LspDocumentColorInlayPosition::Before
+    );
 }
 
 #[gpui::test]

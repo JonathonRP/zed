@@ -404,6 +404,8 @@ TBD: Centered layout related settings
 
   // How to render LSP `textDocument/documentColor` colors in the editor.
   "lsp_document_colors": "inlay",        // none, inlay, border, background
+  // Placement of document color inlays. RP stable defaults to after; upstream defaults to before.
+  "lsp_document_color_inlay_position": "after", // before, after
   // Shape of document color inlays. Only applies when lsp_document_colors is inlay.
   "lsp_document_color_inlay_shape": "square", // square, circle
   // Whether to query and display LSP document links in the editor.
