@@ -118,6 +118,8 @@ jobs:
           ZED_REQUIRE_SCCACHE: "1"
           ZED_CLIENT_CHECKSUM_SEED: fork-unsigned-stable
         run: |
+          script/test-bundle-windows-identity.ps1
+
           $metadataPath = "target/rp-release-metadata/rp-release-manifest.json"
           $metadata = Get-Content -Raw $metadataPath | ConvertFrom-Json
           if ($metadata.calendar_version -ne $env:RP_VERSION) {
@@ -131,9 +133,7 @@ jobs:
 
           $bundleStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
           try {
-            script/bundle-windows.ps1 `
-              -Architecture x86_64 `
-              -ZedFeatures remote/build-remote-server-binary
+            script/bundle-windows.ps1 -Architecture x86_64
           } finally {
             $bundleStopwatch.Stop()
             Write-Host "RP Windows bundle elapsed: $($bundleStopwatch.Elapsed)"
@@ -142,8 +142,8 @@ jobs:
             & $env:SCCACHE_PATH --show-stats --stats-format json |
               ConvertFrom-Json
           )
-          if ($sccacheStats.stats.compile_requests -le 1) {
-            throw "RP Windows build bypassed sccache after the controlled probe"
+          if ($sccacheStats.stats.compile_requests -lt 1) {
+            throw "RP Windows build bypassed sccache"
           }
           Compress-Archive `
             -Path inno/x86_64/* `

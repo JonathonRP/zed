@@ -2162,11 +2162,11 @@ fn validate_rp_windows_path_model(
 ) -> Result<RpWindowsPathModel> {
     let local_app_data = normalize_windows_path_model(local_app_data)?;
     let running_app_path = normalize_windows_path_model(running_app_path)?;
-    let root = format!(r"{local_app_data}\Programs\Zed-ACP-Patched");
+    let root = format!(r"{local_app_data}\Programs\Zed-RP");
     let expected_exe = format!(r"{root}\Zed.exe");
     anyhow::ensure!(
         running_app_path.eq_ignore_ascii_case(&expected_exe),
-        "running RP executable is not the exact side-by-side Zed-ACP-Patched layout"
+        "running RP executable is not the exact side-by-side Zed-RP layout"
     );
     Ok(RpWindowsPathModel {
         root,
@@ -2646,12 +2646,9 @@ mod tests {
     #[test]
     fn rp_windows_path_model_rejects_overlapping_and_ambiguous_paths() {
         let local = r"C:\Users\RP\AppData\Local";
-        let expected = r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched\Zed.exe";
+        let expected = r"C:\Users\RP\AppData\Local\Programs\Zed-RP\Zed.exe";
         let model = validate_rp_windows_path_model(local, expected).unwrap();
-        assert_eq!(
-            model.root,
-            r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched"
-        );
+        assert_eq!(model.root, r"C:\Users\RP\AppData\Local\Programs\Zed-RP");
         assert!(validate_rp_windows_path_model(local, &expected.to_ascii_lowercase()).is_ok());
         assert!(
             validate_rp_windows_path_model(&format!(r"\\?\{local}"), &format!(r"\\?\{expected}"))
@@ -2659,11 +2656,12 @@ mod tests {
         );
         for rejected in [
             r"C:\Users\RP\AppData\Local\Programs\Zed\Zed.exe",
-            r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched-Evil\Zed.exe",
-            r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched\sub\..\Zed.exe",
-            r"..\Programs\Zed-ACP-Patched\Zed.exe",
+            r"C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched\Zed.exe",
+            r"C:\Users\RP\AppData\Local\Programs\Zed-RP-Evil\Zed.exe",
+            r"C:\Users\RP\AppData\Local\Programs\Zed-RP\sub\..\Zed.exe",
+            r"..\Programs\Zed-RP\Zed.exe",
             r"\\server\share\Zed.exe",
-            r"\\.\C:\Users\RP\AppData\Local\Programs\Zed-ACP-Patched\Zed.exe",
+            r"\\.\C:\Users\RP\AppData\Local\Programs\Zed-RP\Zed.exe",
             r"\\?\UNC\server\share\Zed.exe",
         ] {
             assert!(
