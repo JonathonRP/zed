@@ -276,6 +276,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout release history
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
       - name: Download release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -288,7 +294,7 @@ jobs:
           name: rp-release-metadata-${{ needs.metadata.outputs.version }}
           path: metadata
 
-      - name: Create or update release
+      - name: Create or verify immutable release
         env:
           GH_TOKEN: ${{ github.token }}
           RP_TAG: ${{ needs.metadata.outputs.tag }}
@@ -297,14 +303,20 @@ jobs:
         run: |
           title="RP Fork Release Notes ${RP_VERSION}"
           if gh release view "$RP_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$RP_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$title" \
-              --notes-file metadata/release-notes.md
-            gh release upload "$RP_TAG" dist/* \
-              --clobber \
+            git fetch --force origin "refs/tags/${RP_TAG}:refs/tags/${RP_TAG}"
+            tag_sha="$(git rev-list -n 1 "refs/tags/${RP_TAG}")"
+            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
+              echo "::error::Published RP tag ${RP_TAG} points to ${tag_sha}, not ${GITHUB_SHA}"
+              exit 1
+            fi
+            mkdir published-dist
+            gh release download "$RP_TAG" \
+              --dir published-dist \
               --repo "$GITHUB_REPOSITORY"
+            python3 script/rp_release_metadata.py \
+              --verify-published-assets dist \
+              --published-assets published-dist
+            echo "Published RP release ${RP_TAG} is byte-identical; leaving it unchanged."
           elif [[ "$RP_REUSED" == "true" ]]; then
             gh release create "$RP_TAG" dist/* \
               --repo "$GITHUB_REPOSITORY" \

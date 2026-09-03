@@ -6,8 +6,8 @@ use client::zed_urls;
 use db::kvp::{Dismissable, KeyValueStore};
 use editor::{Editor, MultiBuffer};
 use gpui::{
-    App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Global, TaskExt, Window,
-    actions, prelude::*,
+    App, AppContext as _, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Global,
+    TaskExt, Window, actions, prelude::*,
 };
 use markdown_preview::markdown_preview_view::{MarkdownPreviewMode, MarkdownPreviewView};
 use prompt_store::rules_to_skills_migration;
@@ -66,6 +66,34 @@ struct RpReleaseNotesOpenState {
 }
 
 impl Global for RpReleaseNotesOpenState {}
+
+impl RpReleaseNotesOpenState {
+    fn reserve(
+        &mut self,
+        current_version: &str,
+        last_shown_version: Option<&str>,
+        force: bool,
+    ) -> bool {
+        if rp_release_notes_open_decision(
+            current_version,
+            last_shown_version,
+            self.in_flight_version.as_deref(),
+            force,
+        ) != RpReleaseNotesOpenDecision::Open
+        {
+            return false;
+        }
+
+        self.in_flight_version = Some(current_version.to_owned());
+        true
+    }
+
+    fn release(&mut self, version: &str) {
+        if self.in_flight_version.as_deref() == Some(version) {
+            self.in_flight_version = None;
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RpReleaseNotesOpenDecision {
@@ -257,19 +285,11 @@ fn reserve_rp_release_notes_open(
     force: bool,
     cx: &mut App,
 ) -> bool {
-    let state = cx.default_global::<RpReleaseNotesOpenState>();
-    if rp_release_notes_open_decision(
+    cx.default_global::<RpReleaseNotesOpenState>().reserve(
         current_version,
         last_shown_version,
-        state.in_flight_version.as_deref(),
         force,
-    ) != RpReleaseNotesOpenDecision::Open
-    {
-        return false;
-    }
-
-    state.in_flight_version = Some(current_version.to_owned());
-    true
+    )
 }
 
 fn maybe_open_rp_release_notes(
@@ -302,12 +322,20 @@ fn open_rp_release_notes(
     rp_release: RpReleaseMetadata,
     cx: &mut Context<Workspace>,
 ) {
+    let window_handle = window.window_handle();
     let markdown = workspace
         .app_state()
         .languages
         .language_for_name("Markdown");
 
-    cx.spawn_in(window, async move |workspace, cx| {
+    cx.spawn(async move |workspace, cx| {
+        let cleanup_cx = cx.clone();
+        let _release_reservation = util::defer(move || {
+            cleanup_cx.update(|cx| {
+                cx.default_global::<RpReleaseNotesOpenState>()
+                    .release(rp_release.calendar_version);
+            });
+        });
         let markdown = markdown.await.log_err();
         let res: Option<()> = maybe!(async {
             let project = workspace
@@ -328,8 +356,8 @@ fn open_rp_release_notes(
             let buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx).with_title(title));
 
             let ws_handle = workspace.clone();
-            workspace
-                .update_in(cx, |workspace, window, cx| {
+            cx.update_window(window_handle, |_, window, cx| {
+                workspace.update(cx, |workspace, cx| {
                     let editor =
                         cx.new(|cx| Editor::for_multibuffer(buffer, Some(project), window, cx));
                     let markdown_preview: Entity<MarkdownPreviewView> = MarkdownPreviewView::new(
@@ -349,13 +377,14 @@ fn open_rp_release_notes(
                     );
                     cx.notify();
                 })
-                .ok()
+            })
+            .ok()?
+            .ok()
         })
         .await;
 
-        if res.is_some()
-            && let Some(kvp) = cx.update(|_, cx| KeyValueStore::global(cx)).log_err()
-        {
+        if res.is_some() {
+            let kvp = cx.update(|cx| KeyValueStore::global(cx));
             kvp.write_kvp(
                 RP_RELEASE_NOTES_KVP_KEY.to_owned(),
                 rp_release.calendar_version.to_owned(),
@@ -364,17 +393,9 @@ fn open_rp_release_notes(
             .log_err();
         }
 
-        cx.update(|_, cx| {
-            let state = cx.default_global::<RpReleaseNotesOpenState>();
-            if state.in_flight_version.as_deref() == Some(rp_release.calendar_version) {
-                state.in_flight_version = None;
-            }
-        })
-        .log_err();
-
         if res.is_none() {
-            workspace
-                .update_in(cx, |workspace, _window, cx| {
+            if let Ok(Err(error)) = cx.update_window(window_handle, |_, _window, cx| {
+                workspace.update(cx, |workspace, cx| {
                     struct RpReleaseNotesError;
 
                     impl WorkspaceError for RpReleaseNotesError {
@@ -393,7 +414,9 @@ fn open_rp_release_notes(
 
                     workspace.show_error(RpReleaseNotesError, cx);
                 })
-                .log_err();
+            }) {
+                anyhow::Result::<()>::Err(error).log_err();
+            }
         }
     })
     .detach();
@@ -668,5 +691,17 @@ mod tests {
             rp_release_notes_open_decision("20260902.1", Some("20260902.1"), None, true),
             RpReleaseNotesOpenDecision::Open
         );
+    }
+
+    #[test]
+    fn failed_open_releases_reservation_for_manual_recovery() {
+        let mut state = RpReleaseNotesOpenState::default();
+
+        assert!(state.reserve("20260902.1", None, false));
+        assert!(!state.reserve("20260902.1", None, true));
+
+        state.release("20260902.1");
+
+        assert!(state.reserve("20260902.1", Some("20260902.1"), true));
     }
 }
