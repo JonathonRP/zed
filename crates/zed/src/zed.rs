@@ -67,7 +67,7 @@ use project::{
 use project_panel::ProjectPanel;
 use quick_action_bar::QuickActionBar;
 use recent_projects::open_remote_project;
-use release_channel::{AppCommitSha, AppVersion, ReleaseChannel};
+use release_channel::{AppCommitSha, AppVersion, ReleaseChannel, rp_release_metadata};
 use rope::Rope;
 use search::project_search::ProjectSearchBar;
 use settings::{
@@ -1560,7 +1560,10 @@ fn open_about_window(cx: &mut App) {
             } else {
                 ""
             };
-            let message: SharedString = format!("{release_channel_name} {version} {debug}").into();
+            let message: SharedString = rp_release_metadata()
+                .map(|release| format!("Unsigned RP Stable {} {debug}", release.calendar_version))
+                .unwrap_or_else(|| format!("{release_channel_name} {version} {debug}"))
+                .into();
             let commit = AppCommitSha::try_global(cx)
                 .map(|sha| sha.full())
                 .filter(|commit| !commit.is_empty())
