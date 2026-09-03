@@ -271,7 +271,6 @@ def generate_metadata(
         "trust": {"signed": False, "label": "unsigned"},
         "notes_identity": f"sha256:{notes_identity}",
         "previous_calendar_tag": previous_tag.name if previous_tag else None,
-        "reused_calendar_version": allocation.reused,
         "fragments": [fragment["id"] for fragment in fragments],
         "asset_names": release_asset_names(allocation.version),
     }
@@ -291,6 +290,40 @@ def sha256_file(path: pathlib.Path) -> str:
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def verify_published_assets(
+    expected_directory: pathlib.Path, published_directory: pathlib.Path
+) -> None:
+    expected = {
+        path.name: path for path in expected_directory.iterdir() if path.is_file()
+    }
+    published = {
+        path.name: path for path in published_directory.iterdir() if path.is_file()
+    }
+    if expected.keys() != published.keys():
+        missing = sorted(expected.keys() - published.keys())
+        unexpected = sorted(published.keys() - expected.keys())
+        details = []
+        if missing:
+            details.append(f"missing published assets: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected published assets: {', '.join(unexpected)}")
+        raise MetadataError("; ".join(details))
+
+    mismatches = []
+    for name, expected_path in expected.items():
+        published_path = published[name]
+        if (
+            expected_path.stat().st_size != published_path.stat().st_size
+            or sha256_file(expected_path) != sha256_file(published_path)
+        ):
+            mismatches.append(name)
+    if mismatches:
+        raise MetadataError(
+            "published RP release is immutable; rebuilt assets differ: "
+            + ", ".join(sorted(mismatches))
+        )
 
 
 def finalize_update_manifest(
@@ -386,6 +419,8 @@ def main() -> int:
     parser.add_argument("--dist", type=pathlib.Path)
     parser.add_argument("--repository")
     parser.add_argument("--output-file", type=pathlib.Path)
+    parser.add_argument("--verify-published-assets", type=pathlib.Path)
+    parser.add_argument("--published-assets", type=pathlib.Path)
     parser.add_argument(
         "--date",
         default=datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d"),
@@ -397,7 +432,14 @@ def main() -> int:
         parser.error("--date must use YYYYMMDD")
 
     try:
-        if args.finalize_manifest is not None:
+        if args.verify_published_assets is not None:
+            if args.published_assets is None:
+                parser.error("--verify-published-assets requires --published-assets")
+            verify_published_assets(
+                args.verify_published_assets.resolve(),
+                args.published_assets.resolve(),
+            )
+        elif args.finalize_manifest is not None:
             if args.dist is None or args.repository is None or args.output_file is None:
                 parser.error(
                     "--finalize-manifest requires --dist, --repository, and --output-file"
