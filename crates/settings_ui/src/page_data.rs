@@ -10263,6 +10263,26 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
         files: USER,
     })];
 
+    let lsp_document_color_inlay_position_item = [SettingsPageItem::SettingItem(SettingItem {
+        title: "LSP Document Color Inlay Position",
+        description: "Placement of LSP color previews when document colors are rendered as inlays.",
+        field: Box::new(SettingField {
+            organization_override: None,
+            json_path: Some("lsp_document_color_inlay_position"),
+            pick: |settings_content| {
+                settings_content
+                    .editor
+                    .lsp_document_color_inlay_position
+                    .as_ref()
+            },
+            write: |settings_content, value, _| {
+                settings_content.editor.lsp_document_color_inlay_position = value;
+            },
+        }),
+        metadata: None,
+        files: USER,
+    })];
+
     if is_global {
         concat_sections!(
             indentation_section(),
@@ -10275,6 +10295,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             inlay_hints_section(),
             code_lens_item,
             lsp_document_colors_item,
+            lsp_document_color_inlay_position_item,
             lsp_document_color_inlay_shape_item,
             tasks_section(),
             miscellaneous_section(),

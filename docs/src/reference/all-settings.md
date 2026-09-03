@@ -3277,6 +3277,17 @@ Configuration for various AI model providers including API URLs and authenticati
 3. `border`: Draw a border around the color text.
 4. `none`: Do not query and render document colors.
 
+## LSP Document Color Inlay Position
+
+- Description: Placement of LSP `textDocument/documentColor` inlay swatches. This setting only applies when `lsp_document_colors` is set to `inlay`.
+- Setting: `lsp_document_color_inlay_position`
+- Default: `before` generally; `after` in RP stable
+
+**Options**
+
+1. `before`: Render document color inlays before the color text.
+2. `after`: Render document color inlays after the color text.
+
 ## LSP Document Color Inlay Shape
 
 - Description: Shape of LSP `textDocument/documentColor` inlay swatches. This setting only applies when `lsp_document_colors` is set to `inlay`.
