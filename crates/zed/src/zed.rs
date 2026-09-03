@@ -1551,19 +1551,23 @@ fn open_about_window(cx: &mut App) {
     impl AboutWindow {
         fn new(cx: &mut Context<Self>) -> Self {
             let release_channel = ReleaseChannel::global(cx);
-            let release_channel_name = release_channel.display_name();
             let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            let version = AppVersion::global(cx);
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"
             } else {
                 ""
             };
-            let message: SharedString = rp_release_metadata()
-                .map(|release| format!("Unsigned RP Stable {} {debug}", release.calendar_version))
-                .unwrap_or_else(|| format!("{release_channel_name} {version} {debug}"))
-                .into();
+            let message: SharedString = format!(
+                "{} {debug}",
+                release_channel::release_display_identity(
+                    rp_release_metadata(),
+                    release_channel,
+                    &version
+                )
+            )
+            .into();
             let commit = AppCommitSha::try_global(cx)
                 .map(|sha| sha.full())
                 .filter(|commit| !commit.is_empty())
