@@ -85,6 +85,19 @@ impl RpExtensionCatalogClient {
         )
         .await?;
         let expected_digest = parse_digest_file(&digest_bytes)?;
+        let accepted = {
+            self.catalog
+                .lock()
+                .map_err(|_| anyhow::anyhow!("RP catalog lock poisoned"))?
+                .clone()
+        };
+        if let Some(catalog) = accepted
+            && catalog.digest == expected_digest
+        {
+            self.validate_revision_floor(&catalog).await?;
+            return Ok(catalog);
+        }
+
         let catalog_bytes = get_bounded(
             &self.http_client,
             CATALOG_URL,
@@ -104,15 +117,24 @@ impl RpExtensionCatalogClient {
         Ok(catalog)
     }
 
-    async fn accept_revision(&self, catalog: &ValidatedCatalog) -> Result<()> {
-        let previous = match self.fs.load(&self.state_path).await {
-            Ok(value) => Some(
+    async fn persisted_state(&self) -> Result<Option<PersistedCatalogState>> {
+        match self.fs.load(&self.state_path).await {
+            Ok(value) => Ok(Some(
                 serde_json::from_str::<PersistedCatalogState>(&value)
                     .context("invalid persisted RP catalog state")?,
-            ),
-            Err(_error) if self.fs.metadata(&self.state_path).await?.is_none() => None,
-            Err(error) => return Err(error).context("reading persisted RP catalog state"),
-        };
+            )),
+            Err(_error) if self.fs.metadata(&self.state_path).await?.is_none() => Ok(None),
+            Err(error) => Err(error).context("reading persisted RP catalog state"),
+        }
+    }
+
+    async fn validate_revision_floor(&self, catalog: &ValidatedCatalog) -> Result<()> {
+        let previous = self.persisted_state().await?;
+        validate_revision(previous.as_ref(), catalog.revision, &catalog.digest)
+    }
+
+    async fn accept_revision(&self, catalog: &ValidatedCatalog) -> Result<()> {
+        let previous = self.persisted_state().await?;
         validate_revision(previous.as_ref(), catalog.revision, &catalog.digest)?;
         let state = PersistedCatalogState {
             revision: catalog.revision,
@@ -135,7 +157,7 @@ impl RpExtensionCatalogClient {
             self.accepted_catalog().await?
         };
         let search = search.map(str::to_ascii_lowercase);
-        Ok(catalog
+        let mut extensions = catalog
             .data
             .iter()
             .filter(|extension| {
@@ -166,7 +188,9 @@ impl RpExtensionCatalogClient {
                 })
             })
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        sort_catalog_results(&mut extensions);
+        Ok(extensions)
     }
 
     pub(crate) async fn versions(&self, id: &str) -> Result<Vec<ExtensionMetadata>> {
@@ -176,7 +200,7 @@ impl RpExtensionCatalogClient {
     }
 
     pub(crate) async fn latest(&self, id: &str) -> Result<ExtensionMetadata> {
-        self.refresh()
+        self.accepted_catalog()
             .await?
             .data
             .iter()
@@ -374,6 +398,15 @@ struct ValidatedCatalog {
     data: Vec<ExtensionMetadata>,
     versions: BTreeMap<String, Vec<ExtensionMetadata>>,
     packages: BTreeMap<String, RpPackage>,
+}
+
+fn sort_catalog_results(extensions: &mut [ExtensionMetadata]) {
+    extensions.sort_unstable_by(|left, right| {
+        right
+            .download_count
+            .cmp(&left.download_count)
+            .then_with(|| left.id.cmp(&right.id))
+    });
 }
 
 fn installable_versions(catalog: &ValidatedCatalog, id: &str) -> Option<Vec<ExtensionMetadata>> {
@@ -626,6 +659,7 @@ fn validate_catalog(bytes: &[u8], digest: String) -> Result<ValidatedCatalog> {
         .unavailable_source_entries
         .iter()
         .map(|entry| {
+            validate_id_version(&entry.id, &entry.version)?;
             ensure!(
                 entry.reason == "not-published-by-upstream",
                 "unexpected unavailable source reason"
@@ -855,6 +889,7 @@ fn validate_url(value: &str, expected_host: &str) -> Result<Url> {
 
 fn validate_id_version(id: &str, version: &str) -> Result<()> {
     validate_catalog_component(id, false).context("invalid extension id")?;
+    validate_windows_component(id).context("invalid Windows extension id")?;
     validate_catalog_component(version, true).context("invalid extension version")?;
     Ok(())
 }
@@ -1285,6 +1320,9 @@ fn validate_windows_component(value: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fs::FakeFs;
+    use gpui::BackgroundExecutor;
+    use http_client::{FakeHttpClient, Response};
     use serde_json::{Value, json};
 
     fn catalog_fixture() -> Value {
@@ -1526,6 +1564,31 @@ mod tests {
     }
 
     #[test]
+    fn catalog_results_are_popularity_sorted_with_stable_id_ties() {
+        let catalog = validate_fixture(&catalog_fixture()).unwrap();
+        let mut low = catalog.data[0].clone();
+        low.id = "low".into();
+        low.download_count = 1;
+        let mut tie_b = catalog.data[0].clone();
+        tie_b.id = "tie-b".into();
+        tie_b.download_count = 10;
+        let mut tie_a = catalog.data[0].clone();
+        tie_a.id = "tie-a".into();
+        tie_a.download_count = 10;
+        let mut extensions = vec![low, tie_b, tie_a];
+
+        sort_catalog_results(&mut extensions);
+
+        assert_eq!(
+            extensions
+                .iter()
+                .map(|extension| extension.id.as_ref())
+                .collect::<Vec<_>>(),
+            ["tie-a", "tie-b", "low"]
+        );
+    }
+
+    #[test]
     fn catalog_integrity_correspondence_is_fail_closed() {
         let mutations: Vec<Box<dyn Fn(&mut Value)>> = vec![
             Box::new(|catalog| catalog["entry_count"] = json!(2)),
@@ -1650,6 +1713,101 @@ mod tests {
         }
         assert!(validate_catalog_component("v0.0.1", true).is_ok());
         assert!(validate_catalog_component("2025.08.0", true).is_ok());
+        for id in ["CON", "con.txt", "COM0", "LPT9.log", "foo."] {
+            assert!(validate_id_version(id, "1.0.0").is_err(), "{id}");
+        }
+        assert!(validate_id_version("safe-extension", "1.0.0").is_ok());
+    }
+
+    #[gpui::test]
+    async fn digest_first_refresh_reuses_snapshot_and_accepts_changed_digest(
+        executor: BackgroundExecutor,
+    ) {
+        struct Server {
+            catalog: Vec<u8>,
+            digest: String,
+            digest_requests: usize,
+            catalog_requests: usize,
+        }
+
+        let first_bytes = serde_json::to_vec_pretty(&catalog_fixture()).unwrap();
+        let first_digest = sha256_hex(&first_bytes);
+        let server = Arc::new(Mutex::new(Server {
+            catalog: first_bytes,
+            digest: first_digest,
+            digest_requests: 0,
+            catalog_requests: 0,
+        }));
+        let http_client = FakeHttpClient::create({
+            let server = server.clone();
+            move |request| {
+                let server = server.clone();
+                async move {
+                    let uri = request.uri().to_string();
+                    let mut server = server.lock().unwrap();
+                    if uri == CATALOG_DIGEST_URL {
+                        server.digest_requests += 1;
+                        let digest = server.digest.clone();
+                        Ok(Response::new(format!("{digest}  catalog.json\n").into()))
+                    } else if uri == CATALOG_URL {
+                        server.catalog_requests += 1;
+                        Ok(Response::new(server.catalog.clone().into()))
+                    } else {
+                        Ok(Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(AsyncBody::default())
+                            .unwrap())
+                    }
+                }
+            }
+        });
+        let fs = FakeFs::new(executor);
+        fs.insert_tree("/extensions", json!({})).await;
+        let client =
+            RpExtensionCatalogClient::new(Path::new("/extensions"), fs.clone(), http_client);
+
+        let first = client.refresh().await.unwrap();
+        assert_eq!(first.revision, 100);
+        let unchanged = client.refresh().await.unwrap();
+        assert!(Arc::ptr_eq(&first, &unchanged));
+        client.latest("example").await.unwrap();
+        client.versions("example").await.unwrap();
+        assert_eq!(
+            {
+                let server = server.lock().unwrap();
+                (server.digest_requests, server.catalog_requests)
+            },
+            (2, 1)
+        );
+
+        let mut next = catalog_fixture();
+        next["snapshot_revision"] = json!("101");
+        let next_bytes = serde_json::to_vec_pretty(&next).unwrap();
+        let next_digest = sha256_hex(&next_bytes);
+        {
+            let mut server = server.lock().unwrap();
+            server.catalog = next_bytes;
+            server.digest = next_digest.clone();
+        }
+        let changed = client.refresh().await.unwrap();
+        assert_eq!(changed.revision, 101);
+        assert_eq!(changed.digest, next_digest);
+        assert_eq!(
+            {
+                let server = server.lock().unwrap();
+                (server.digest_requests, server.catalog_requests)
+            },
+            (3, 2)
+        );
+
+        let persisted: PersistedCatalogState = serde_json::from_str(
+            &fs.load(Path::new("/extensions/rp-catalog-state.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.revision, 101);
+        assert_eq!(persisted.digest, changed.digest);
     }
 
     #[test]
