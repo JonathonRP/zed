@@ -78,6 +78,21 @@ if (-not $vsDevShell) {
     throw "Could not find a Visual Studio developer shell with the C++ toolchain"
 }
 
+$script:cargoRustcWrapperConfig = $null
+function Invoke-BundleCargo {
+    param([string[]]$Arguments)
+
+    $cargoArguments = @()
+    if ($script:cargoRustcWrapperConfig) {
+        $cargoArguments += @("--config", $script:cargoRustcWrapperConfig)
+    }
+    $cargoArguments += $Arguments
+    cargo @cargoArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cargo failed with exit code $LASTEXITCODE"
+    }
+}
+
 Push-Location
 $requiredRustcWrapper = $env:RUSTC_WRAPPER
 & $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
@@ -95,26 +110,35 @@ if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
     $env:RUSTC_WRAPPER = $requiredRustcWrapper
     $env:CARGO_BUILD_RUSTC_WRAPPER = $requiredRustcWrapper
     $env:SCCACHE_PATH = $requiredRustcWrapper
+    $script:cargoRustcWrapperConfig = "build.rustc-wrapper='$requiredRustcWrapper'"
 
     Write-Host "RP Windows sccache wrapper: $requiredRustcWrapper"
     & $requiredRustcWrapper --version
     & $requiredRustcWrapper --zero-stats
 
     $probeDir = Join-Path $env:RUNNER_TEMP "rp-sccache-probe"
-    New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
-    $probeSource = Join-Path $probeDir "probe.rs"
-    $probeOutput = Join-Path $probeDir "librp_sccache_probe.rmeta"
+    $probeSourceDir = Join-Path $probeDir "src"
+    New-Item -ItemType Directory -Force -Path $probeSourceDir | Out-Null
+    $probeManifest = Join-Path $probeDir "Cargo.toml"
+    $probeSource = Join-Path $probeSourceDir "lib.rs"
+    $probeOutput = Join-Path $probeDir "target\release\librp_sccache_probe.rlib"
+    @(
+        "[package]"
+        'name = "rp-sccache-probe"'
+        'version = "0.1.0"'
+        'edition = "2024"'
+    ) | Set-Content -LiteralPath $probeManifest -Encoding utf8
     "pub fn rp_sccache_probe() -> u32 { 42 }" |
         Set-Content -LiteralPath $probeSource -Encoding utf8
-    $rustcPath = (Get-Command rustc -ErrorAction Stop).Source
-    & $requiredRustcWrapper $rustcPath `
-        --crate-name rp_sccache_probe `
-        --crate-type lib `
-        --emit metadata `
-        --out-dir $probeDir `
-        $probeSource
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $probeOutput -PathType Leaf)) {
-        throw "RP Windows sccache probe failed"
+    Invoke-BundleCargo -Arguments @(
+        "build",
+        "--release",
+        "--manifest-path", $probeManifest,
+        "--target-dir", (Join-Path $probeDir "target"),
+        "--lib"
+    )
+    if (-not (Test-Path -LiteralPath $probeOutput -PathType Leaf)) {
+        throw "RP Windows Cargo sccache probe failed"
     }
 
     $probeStats = (
@@ -122,12 +146,37 @@ if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
             ConvertFrom-Json
     )
     if ($probeStats.stats.compile_requests -lt 1 -or $probeStats.stats.requests_executed -lt 1) {
-        throw "RP Windows sccache probe did not register a compile request"
+        throw "RP Windows Cargo sccache probe did not register a cacheable compile request"
     }
     Write-Host "RP Windows sccache controlled probe statistics:"
     & $requiredRustcWrapper --show-stats
     & $requiredRustcWrapper --zero-stats
     Write-Host "RP Windows sccache statistics reset; subsequent counts are release build only"
+}
+
+function Assert-RpSccacheBuild {
+    if ([string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
+        return
+    }
+
+    $stats = (
+        & $requiredRustcWrapper --show-stats --stats-format json |
+            ConvertFrom-Json
+    )
+    $compileRequests = [int64]$stats.stats.compile_requests
+    Write-Host "RP Windows release build sccache statistics:"
+    & $requiredRustcWrapper --show-stats
+    if ($compileRequests -lt 100) {
+        throw "RP Windows release build registered only $compileRequests sccache requests"
+    }
+    if ($env:GITHUB_STEP_SUMMARY) {
+        @(
+            "### RP Windows release build sccache"
+            ""
+            "- Compile requests: $compileRequests"
+            "- Probe requests excluded: yes"
+        ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+    }
 }
 
 Push-Location -Path crates/zed
@@ -213,20 +262,20 @@ function BuildZedAndItsFriends {
     if ($ZedFeatures) {
         $zedBuildArgs += @('--features', ($ZedFeatures -join ','))
     }
-    cargo @zedBuildArgs
+    Invoke-BundleCargo -Arguments $zedBuildArgs
     Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
-            cargo --config .cargo/bundle-config.toml build --release --features stable --no-default-features --package explorer_command_injector --target $target
+            Invoke-BundleCargo -Arguments @("--config", ".cargo/bundle-config.toml", "build", "--release", "--features", "stable", "--no-default-features", "--package", "explorer_command_injector", "--target", $target)
         }
         "preview" {
-            cargo --config .cargo/bundle-config.toml build --release --features preview --no-default-features --package explorer_command_injector --target $target
+            Invoke-BundleCargo -Arguments @("--config", ".cargo/bundle-config.toml", "build", "--release", "--features", "preview", "--no-default-features", "--package", "explorer_command_injector", "--target", $target)
         }
         default {
-            cargo --config .cargo/bundle-config.toml build --release --package explorer_command_injector --target $target
+            Invoke-BundleCargo -Arguments @("--config", ".cargo/bundle-config.toml", "build", "--release", "--package", "explorer_command_injector", "--target", $target)
         }
     }
     Copy-Item -Path ".\$CargoOutDir\explorer_command_injector.dll" -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
@@ -234,7 +283,7 @@ function BuildZedAndItsFriends {
 
 function BuildRemoteServer {
     Write-Output "Building remote_server for $target"
-    cargo --config .cargo/bundle-config.toml build --release --package remote_server --target $target
+    Invoke-BundleCargo -Arguments @("--config", ".cargo/bundle-config.toml", "build", "--release", "--package", "remote_server", "--target", $target)
 
     # Create zipped remote server binary
     $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
@@ -502,8 +551,13 @@ $debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_REL
 CheckEnvironmentVariables
 PrepareForBundle
 GenerateLicenses
+if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
+    & $requiredRustcWrapper --zero-stats
+    Write-Host "RP Windows sccache statistics reset after license generation"
+}
 BuildZedAndItsFriends
 BuildRemoteServer
+Assert-RpSccacheBuild
 MakeAppx
 SignZedAndItsFriends
 ZipZedAndItsFriendsDebug
