@@ -51,7 +51,6 @@ DefaultDirName={autopf}\{#AppName}
 PrivilegesRequired=lowest
 #ifdef RpPackage
 UsePreviousAppDir=yes
-PrivilegesRequiredOverridesAllowed=none
 #endif
 
 ArchitecturesAllowed=x64compatible
