@@ -2,10 +2,17 @@
 AppId={#AppId}
 AppName={#AppName}
 AppVerName={#AppDisplayName}
+#ifdef RpPackage
+AppPublisher=JonathonRP
+AppPublisherURL=https://github.com/JonathonRP/zed
+AppSupportURL=https://github.com/JonathonRP/zed/issues
+AppUpdatesURL=https://github.com/JonathonRP/zed/releases
+#else
 AppPublisher=Zed Industries
 AppPublisherURL=https://www.zed.dev/
 AppSupportURL=https://www.zed.dev/
 AppUpdatesURL=https://www.zed.dev/
+#endif
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
@@ -20,8 +27,13 @@ SetupMutex={#AppMutex}Setup
 ; WizardSmallImageFile="{#ResourcesDir}\inno-small-100.bmp,{#ResourcesDir}\inno-small-125.bmp,{#ResourcesDir}\inno-small-150.bmp,{#ResourcesDir}\inno-small-175.bmp,{#ResourcesDir}\inno-small-200.bmp,{#ResourcesDir}\inno-small-225.bmp,{#ResourcesDir}\inno-small-250.bmp"
 SetupIconFile={#ResourcesDir}\{#AppIconName}.ico
 UninstallDisplayIcon={app}\{#AppExeName}.exe
+#ifdef RpPackage
+ChangesEnvironment=false
+ChangesAssociations=false
+#else
 ChangesEnvironment=true
 ChangesAssociations=true
+#endif
 MinVersion=10.0.16299
 SourceDir={#SourceDir}
 AppVersion={#Version}
@@ -37,6 +49,10 @@ SignTool=Defaultsign
 
 DefaultDirName={autopf}\{#AppName}
 PrivilegesRequired=lowest
+#ifdef RpPackage
+UsePreviousAppDir=yes
+PrivilegesRequiredOverridesAllowed=none
+#endif
 
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -56,10 +72,12 @@ Type: filesandordirs; Name: "{app}\arm64"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+#ifndef RpPackage
 Name: "addcontextmenufiles"; Description: "{cm:AddContextMenuFiles,{#AppDisplayName}}"; GroupDescription: "{cm:Other}"
 Name: "addcontextmenufolders"; Description: "{cm:AddContextMenuFolders,{#AppDisplayName}}"; GroupDescription: "{cm:Other}"; Flags: unchecked; Check: not IsWindows11OrLater
 Name: "associatewithfiles"; Description: "{cm:AssociateWithFiles,{#AppDisplayName}}"; GroupDescription: "{cm:Other}"
 Name: "addtopath"; Description: "{cm:AddToPath}"; GroupDescription: "{cm:Other}"
+#endif
 
 [Dirs]
 Name: "{app}"; AfterInstall: DisableAppDirInheritance
@@ -68,7 +86,11 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 Source: "{#ResourcesDir}\Zed.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion
 Source: "{#ResourcesDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
+#ifdef RpPackage
+Source: "{#ResourcesDir}\zed-rp-installer.marker"; DestDir: "{app}"; DestName: ".zed-rp-installer"; Flags: ignoreversion
+#else
 Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: IsWindows11OrLater
+#endif
 #ifexist ResourcesDir + "\amd_ags_x64.dll"
 Source: "{#ResourcesDir}\amd_ags_x64.dll"; DestDir: "{app}"; Flags: ignoreversion
 #endif
@@ -88,9 +110,12 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}.exe"; Tasks: de
 Filename: "{app}\{#AppExeName}.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall; Check: WizardNotSilent
 
 [UninstallRun]
+#ifndef RpPackage
 Filename: "powershell.exe"; Parameters: "Invoke-Command -ScriptBlock {{Remove-AppxPackage -Package ""{#AppxFullName}""}"; Check: IsWindows11OrLater; Flags: shellexec waituntilterminated runhidden
+#endif
 
 [Registry]
+#ifndef RpPackage
 Root: HKCU; Subkey: "Software\Classes\.ascx\OpenWithProgids"; ValueType: none; ValueName: "{#RegValueName}"; Flags: deletevalue uninsdeletevalue; Tasks: associatewithfiles
 Root: HKCU; Subkey: "Software\Classes\.ascx\OpenWithProgids"; ValueType: string; ValueName: "{#RegValueName}.ascx"; ValueData: ""; Flags: uninsdeletevalue; Tasks: associatewithfiles
 Root: HKCU; Subkey: "Software\Classes\{#RegValueName}.ascx"; ValueType: string; ValueName: ""; ValueData: "{cm:SourceFile,ASCX}"; Flags: uninsdeletekey; Tasks: associatewithfiles
@@ -1260,6 +1285,7 @@ Root: HKCU; Subkey: "Software\Classes\zed"; ValueType: "string"; ValueData: "URL
 Root: HKCU; Subkey: "Software\Classes\zed"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\zed\DefaultIcon"; ValueType: "string"; ValueData: "{app}\Zed.exe,1"
 Root: HKCU; Subkey: "Software\Classes\zed\shell\open\command"; ValueType: "string"; ValueData: """{app}\Zed.exe"" ""%1"""
+#endif
 
 [Code]
 function WizardNotSilent(): Boolean;
@@ -1267,6 +1293,7 @@ begin
   Result := not WizardSilent();
 end;
 
+#ifndef RpPackage
 function IsWindows11OrLater(): Boolean;
 begin
   Result := (GetWindowsVersion >= $0A0055F0);
@@ -1345,6 +1372,7 @@ begin
   end;
   RegWriteExpandStringValue(HKCU, 'Environment', 'Path', NewPath);
 end;
+#endif
 
 // https://docs.microsoft.com/en-us/windows-server/administration/windows-commands/icacls
 // https://docs.microsoft.com/en-US/windows/security/identity-protection/access-control/security-identifiers
@@ -1360,6 +1388,7 @@ begin
   Exec(ExpandConstant('{sys}\icacls.exe'), ExpandConstant('"{app}" /inheritancelevel:r ') + Permissions, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;
 
+#ifndef RpPackage
 procedure AddAppxPackage();
 var
   AddAppxPackageResultCode: Integer;
@@ -1382,6 +1411,7 @@ begin
     RegDeleteKeyIncludingSubkeys(HKCU, 'Software\Classes\{#RegValueName}ContextMenu');
   end;
 end;
+#endif
 
 function SwitchHasValue(Name: string; Value: string): Boolean;
 begin

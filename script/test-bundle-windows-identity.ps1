@@ -1,0 +1,144 @@
+$ErrorActionPreference = "Stop"
+
+function Assert-Matches {
+    param(
+        [string]$Text,
+        [string]$Pattern,
+        [string]$Message
+    )
+
+    if ($Text -notmatch $Pattern) {
+        throw $Message
+    }
+}
+
+function Get-Assignment {
+    param(
+        [string]$Text,
+        [string]$Name
+    )
+
+    return [regex]::Match(
+        $Text,
+        "\`$$Name\s*=\s*`"(?<value>[^`"]*)`""
+    ).Groups["value"].Value
+}
+
+function Resolve-RpGuards {
+    param(
+        [string]$Text,
+        [bool]$RpPackage
+    )
+
+    $result = [System.Collections.Generic.List[string]]::new()
+    $states = [System.Collections.Generic.Stack[object]]::new()
+    $active = $true
+    foreach ($line in $Text -split "\r?\n") {
+        if ($line -match '^#ifdef RpPackage$') {
+            $states.Push([pscustomobject]@{ ParentActive = $active; Condition = $RpPackage })
+            $active = $active -and $RpPackage
+            continue
+        }
+        if ($line -match '^#ifndef RpPackage$') {
+            $states.Push([pscustomobject]@{ ParentActive = $active; Condition = -not $RpPackage })
+            $active = $active -and (-not $RpPackage)
+            continue
+        }
+        if ($line -eq "#else" -and $states.Count -gt 0) {
+            $state = $states.Peek()
+            $active = $state.ParentActive -and (-not $state.Condition)
+            continue
+        }
+        if ($line -eq "#endif" -and $states.Count -gt 0) {
+            $active = $states.Pop().ParentActive
+            continue
+        }
+        if ($active) {
+            $result.Add($line)
+        }
+    }
+    if ($states.Count -ne 0) {
+        throw "Unbalanced RpPackage preprocessor guards"
+    }
+    return $result -join "`n"
+}
+
+$root = Split-Path -Parent $PSScriptRoot
+$bundle = Get-Content -Raw "$root\script\bundle-windows.ps1"
+$installer = Get-Content -Raw "$root\crates\zed\resources\windows\zed.iss"
+$releaseChannel = Get-Content -Raw "$root\crates\release_channel\src\lib.rs"
+
+$officialBlock = [regex]::Match(
+    $bundle,
+    '(?s)function BuildInstaller.*?switch \(\$channel\)\s*\{\s*"stable"\s*\{(?<body>.*?)\}\s*"preview"'
+).Groups["body"].Value
+$rpBlock = [regex]::Match(
+    $bundle,
+    '(?s)if \(\$isRpPackage\) \{\s+if \(\$channel -ne "stable"\).*?(?<body>\$appId = .*?)\s+\}'
+).Groups["body"].Value
+
+foreach ($name in @("appId", "appName", "appDisplayName", "appMutex", "regValueName", "appUserId")) {
+    $officialValue = Get-Assignment $officialBlock $name
+    $rpValue = Get-Assignment $rpBlock $name
+    if (-not $officialValue -or -not $rpValue -or $officialValue -eq $rpValue) {
+        throw "RP and official stable $name values must both exist and be distinct"
+    }
+}
+
+$rpIdentifier = [regex]::Match(
+    $releaseChannel,
+    'const RP_APP_IDENTIFIER: &str = "(?<id>[^"]+)"'
+).Groups["id"].Value
+if (-not $rpIdentifier) {
+    throw "RP runtime application identifier is missing"
+}
+
+Assert-Matches $bundle ([regex]::Escape("`$appMutex = `"$rpIdentifier-Instance-Mutex`"")) `
+    "Installer mutex must match the runtime RP identifier"
+Assert-Matches $bundle '(?s)\$appName = "Zed-ACP-Patched".*?\$appDisplayName = "Zed-ACP-Patched \(Unsigned RP Stable\)".*?\$regValueName = "ZedACPPatchedRPStable".*?\$appUserId = "Zed-ACP-Patched-RP-Stable"' `
+    "RP package identities are incomplete"
+Assert-Matches $bundle '(?s)if \(\$isRpPackage\).*?\$definitions\["RpPackage"\] = "1"' `
+    "RP builds must define the Inno preprocessor guard"
+Assert-Matches $bundle '(?s)identity=Zed-ACP-Patched-RP-Stable.*?zed-rp-installer\.marker' `
+    "RP marker source must be generated"
+
+Assert-Matches $installer '(?s)#ifdef RpPackage\s+AppPublisher=JonathonRP.*?AppPublisherURL=https://github\.com/JonathonRP/zed.*?AppSupportURL=https://github\.com/JonathonRP/zed/issues.*?AppUpdatesURL=https://github\.com/JonathonRP/zed/releases\s+#else\s+AppPublisher=Zed Industries' `
+    "RP publisher URLs must be fork-owned without changing official values"
+Assert-Matches $installer '(?s)#ifdef RpPackage\s+ChangesEnvironment=false\s+ChangesAssociations=false\s+#else\s+ChangesEnvironment=true\s+ChangesAssociations=true\s+#endif' `
+    "RP integration change flags must be disabled"
+Assert-Matches $installer '(?s)PrivilegesRequired=lowest\s+#ifdef RpPackage\s+UsePreviousAppDir=yes\s+PrivilegesRequiredOverridesAllowed=none\s+#endif' `
+    "RP privilege and previous directory policy is missing"
+Assert-Matches $installer '(?s)\[Tasks\]\s+Name: "desktopicon".*?#ifndef RpPackage.*?Name: "addcontextmenufiles".*?Name: "associatewithfiles".*?Name: "addtopath".*?#endif' `
+    "RP integration tasks must be guarded"
+Assert-Matches $installer '(?s)#ifdef RpPackage\s+Source:.*?zed-rp-installer\.marker.*?DestName: "\.zed-rp-installer".*?#else\s+Source:.*?\\appx\\\*' `
+    "RP marker and Appx exclusion must share an exclusive guard"
+Assert-Matches $installer '(?s)\[UninstallRun\]\s+#ifndef RpPackage.*?Remove-AppxPackage.*?#endif\s+\[Registry\]\s+#ifndef RpPackage.*?; URI Scheme.*?Software\\Classes\\zed.*?#endif\s+\[Code\]' `
+    "Appx removal, associations, context menus, PATH, and zed:// registration must be excluded"
+Assert-Matches $installer '(?s)AppId=\{#AppId\}.*?AppVerName=\{#AppDisplayName\}.*?DefaultGroupName=\{#AppName\}.*?\[Icons\]\s+Name: "\{group\}\\\{#AppName\}".*?AppUserModelID: "\{#AppUserId\}"' `
+    "Uninstall, program group, shortcut, and AUMID identities must use isolated definitions"
+
+$rpInstaller = Resolve-RpGuards $installer $true
+$officialInstaller = Resolve-RpGuards $installer $false
+foreach ($integration in @(
+    'Name: "associatewithfiles"',
+    'Name: "addcontextmenufiles"',
+    'Name: "addtopath"',
+    'Source: "{#ResourcesDir}\appx\*"',
+    'Subkey: "Environment"',
+    'Software\Classes\zed',
+    "Add-AppxPackage",
+    "Remove-AppxPackage"
+)) {
+    if ($rpInstaller.Contains($integration)) {
+        throw "RP installer unexpectedly contains integration: $integration"
+    }
+    if (-not $officialInstaller.Contains($integration)) {
+        throw "Official installer unexpectedly lost integration: $integration"
+    }
+}
+if (-not $rpInstaller.Contains('DestName: ".zed-rp-installer"') -or
+    $officialInstaller.Contains('DestName: ".zed-rp-installer"')) {
+    throw "RP marker must only be installed by RP packages"
+}
+
+Write-Output "Windows RP packaging identity assertions passed"
