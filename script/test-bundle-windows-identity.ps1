@@ -67,6 +67,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $bundle = Get-Content -Raw "$root\script\bundle-windows.ps1"
 $installer = Get-Content -Raw "$root\crates\zed\resources\windows\zed.iss"
 $releaseChannel = Get-Content -Raw "$root\crates\release_channel\src\lib.rs"
+$releaseWorkflow = Get-Content -Raw "$root\.github\workflows\fork_stable_release.yml"
 
 $officialBlock = [regex]::Match(
     $bundle,
@@ -95,12 +96,15 @@ if (-not $rpIdentifier) {
 
 Assert-Matches $bundle ([regex]::Escape("`$appMutex = `"$rpIdentifier-Instance-Mutex`"")) `
     "Installer mutex must match the runtime RP identifier"
-Assert-Matches $bundle '(?s)\$appName = "Zed-ACP-Patched".*?\$appDisplayName = "Zed-ACP-Patched \(Unsigned RP Stable\)".*?\$regValueName = "ZedACPPatchedRPStable".*?\$appUserId = "Zed-ACP-Patched-RP-Stable"' `
+Assert-Matches $bundle '(?s)\$appName = "Zed-RP".*?\$appDisplayName = "Zed-RP \(Unsigned RP Stable\)".*?\$regValueName = "ZedRPStable".*?\$appUserId = "Zed-ACP-Patched-RP-Stable"' `
     "RP package identities are incomplete"
 Assert-Matches $bundle '(?s)if \(\$isRpPackage\).*?\$definitions\["RpPackage"\] = "1"' `
     "RP builds must define the Inno preprocessor guard"
 Assert-Matches $bundle '(?s)identity=Zed-ACP-Patched-RP-Stable.*?zed-rp-installer\.marker' `
     "RP marker source must be generated"
+if ($releaseWorkflow.Contains("remote/build-remote-server-binary")) {
+    throw "RP release clients must download the matching published remote server, not build one from source"
+}
 
 Assert-Matches $installer '(?s)#ifdef RpPackage\s+AppPublisher=JonathonRP.*?AppPublisherURL=https://github\.com/JonathonRP/zed.*?AppSupportURL=https://github\.com/JonathonRP/zed/issues.*?AppUpdatesURL=https://github\.com/JonathonRP/zed/releases\s+#else\s+AppPublisher=Zed Industries' `
     "RP publisher URLs must be fork-owned without changing official values"
