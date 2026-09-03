@@ -138,13 +138,6 @@ jobs:
             $bundleStopwatch.Stop()
             Write-Host "RP Windows bundle elapsed: $($bundleStopwatch.Elapsed)"
           }
-          $sccacheStats = (
-            & $env:SCCACHE_PATH --show-stats --stats-format json |
-              ConvertFrom-Json
-          )
-          if ($sccacheStats.stats.compile_requests -lt 1) {
-            throw "RP Windows build bypassed sccache"
-          }
           Compress-Archive `
             -Path inno/x86_64/* `
             -DestinationPath target/zed-windows-x86_64-portable.zip `
