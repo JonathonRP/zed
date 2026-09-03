@@ -94,6 +94,15 @@ jobs:
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
 
+      - name: Pin sccache wrapper path
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath $env:SCCACHE_PATH -PathType Leaf)) {
+            throw "sccache action did not provide a valid SCCACHE_PATH"
+          }
+          "RUSTC_WRAPPER=$env:SCCACHE_PATH" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Select stable channel
         shell: pwsh
         run: '"stable" | Set-Content -NoNewline crates/zed/RELEASE_CHANNEL'
@@ -101,12 +110,12 @@ jobs:
       - name: Build unsigned installer and portable bundle
         shell: pwsh
         env:
-          CARGO_BUILD_JOBS: "1"
+          RP_VERSION: ${{ needs.metadata.outputs.version }}
           ZED_CLIENT_CHECKSUM_SEED: fork-unsigned-stable
         run: |
           $metadataPath = "target/rp-release-metadata/rp-release-manifest.json"
           $metadata = Get-Content -Raw $metadataPath | ConvertFrom-Json
-          if ($metadata.calendar_version -ne "${{ needs.metadata.outputs.version }}") {
+          if ($metadata.calendar_version -ne $env:RP_VERSION) {
             throw "RP metadata version does not match the workflow allocation"
           }
           $env:ZED_RP_RELEASE_VERSION = $metadata.calendar_version
@@ -115,9 +124,15 @@ jobs:
           $env:ZED_RP_RELEASE_NOTES_IDENTITY = $metadata.notes_identity
           $env:ZED_RP_RELEASE_MANIFEST = Get-Content -Raw $metadataPath
 
-          script/bundle-windows.ps1 `
-            -Architecture x86_64 `
-            -ZedFeatures remote/build-remote-server-binary
+          $bundleStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+          try {
+            script/bundle-windows.ps1 `
+              -Architecture x86_64 `
+              -ZedFeatures remote/build-remote-server-binary
+          } finally {
+            $bundleStopwatch.Stop()
+            Write-Host "RP Windows bundle elapsed: $($bundleStopwatch.Elapsed)"
+          }
           Compress-Archive `
             -Path inno/x86_64/* `
             -DestinationPath target/zed-windows-x86_64-portable.zip `
@@ -185,6 +200,7 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           RELEASE_CHANNEL: stable
+          RP_VERSION: ${{ needs.metadata.outputs.version }}
           RUSTFLAGS: -C target-feature=+crt-static
           ZED_RELEASE_CHANNEL: stable
         run: |
@@ -196,7 +212,7 @@ jobs:
             --target x86_64-unknown-linux-musl
           gzip --best --stdout \
             target/x86_64-unknown-linux-musl/release/remote_server \
-            > "target/zed-rp-stable-${{ needs.metadata.outputs.version }}-remote-server-linux-x86_64.gz"
+            > "target/zed-rp-stable-${RP_VERSION}-remote-server-linux-x86_64.gz"
 
       - name: Show sccache statistics
         if: always()
@@ -238,8 +254,10 @@ jobs:
           path: metadata
 
       - name: Finalize release manifests
+        env:
+          RP_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
-          version="${{ needs.metadata.outputs.version }}"
+          version="${RP_VERSION}"
           cp metadata/rp-release-manifest.json \
             "dist/rp-release-manifest-${version}.json"
           cp metadata/release-notes.md \
