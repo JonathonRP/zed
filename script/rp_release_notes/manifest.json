@@ -15,6 +15,10 @@
     {
       "id": "rp-wsl-installer-correction",
       "file": "script/rp_release_notes/fragments/rp-wsl-installer-correction.md"
+    },
+    {
+      "id": "upstream-stable-base",
+      "file": "script/rp_release_notes/fragments/upstream-stable-base.md"
     }
   ]
 }

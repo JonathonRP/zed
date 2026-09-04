@@ -156,6 +156,10 @@ pub struct RpReleaseMetadata {
     pub calendar_version: &'static str,
     /// Git tag that identifies this release.
     pub release_tag: &'static str,
+    /// Official upstream stable tag used as the RP source base.
+    pub upstream_tag: &'static str,
+    /// Full commit SHA pinned by the upstream stable tag.
+    pub upstream_tag_commit: &'static str,
     /// Curated Markdown embedded in the packaged application.
     pub release_notes: &'static str,
     /// SHA-256 identity of `release_notes`.
@@ -169,6 +173,8 @@ pub fn rp_release_metadata() -> Option<RpReleaseMetadata> {
     match (
         option_env!("ZED_RP_RELEASE_VERSION"),
         option_env!("ZED_RP_RELEASE_TAG"),
+        option_env!("ZED_RP_UPSTREAM_TAG"),
+        option_env!("ZED_RP_UPSTREAM_TAG_COMMIT"),
         option_env!("ZED_RP_RELEASE_NOTES"),
         option_env!("ZED_RP_RELEASE_NOTES_IDENTITY"),
         option_env!("ZED_RP_RELEASE_MANIFEST"),
@@ -176,12 +182,16 @@ pub fn rp_release_metadata() -> Option<RpReleaseMetadata> {
         (
             Some(calendar_version),
             Some(release_tag),
+            Some(upstream_tag),
+            Some(upstream_tag_commit),
             Some(release_notes),
             Some(notes_identity),
             Some(manifest),
         ) => Some(RpReleaseMetadata {
             calendar_version,
             release_tag,
+            upstream_tag,
+            upstream_tag_commit,
             release_notes,
             notes_identity,
             manifest,
@@ -202,8 +212,11 @@ pub fn release_display_identity(
     rp_release
         .map(|release| {
             format!(
-                "Unsigned RP Stable {} (Zed {})",
-                release.calendar_version, version
+                "RP {} (Zed {} stable; {} @ {})",
+                release.calendar_version,
+                version,
+                release.upstream_tag,
+                release.upstream_tag_commit
             )
         })
         .unwrap_or_else(|| format!("{} {}", release_channel.display_name(), version))
@@ -215,7 +228,7 @@ pub fn rp_release_notes_title(release: RpReleaseMetadata, version: &Version) -> 
     version.pre = semver::Prerelease::EMPTY;
     version.build = semver::BuildMetadata::EMPTY;
     format!(
-        "RP Fork Release Notes {} (Zed {})",
+        "RP {} (Zed {} stable) Release Notes",
         release.calendar_version, version
     )
 }
@@ -377,6 +390,8 @@ mod tests {
     const RP_RELEASE: RpReleaseMetadata = RpReleaseMetadata {
         calendar_version: "20260902.1",
         release_tag: "rp-stable-20260902.1",
+        upstream_tag: "v1.17.2",
+        upstream_tag_commit: "0123456789abcdef0123456789abcdef01234567",
         release_notes: "# Notes",
         notes_identity: "sha256:notes",
         manifest: "{}",
@@ -400,11 +415,11 @@ mod tests {
         let version = Version::parse("1.17.2-preview.3+stable.sha").unwrap();
         assert_eq!(
             release_display_identity(Some(RP_RELEASE), ReleaseChannel::Stable, &version),
-            "Unsigned RP Stable 20260902.1 (Zed 1.17.2)"
+            "RP 20260902.1 (Zed 1.17.2 stable; v1.17.2 @ 0123456789abcdef0123456789abcdef01234567)"
         );
         assert_eq!(
             rp_release_notes_title(RP_RELEASE, &version),
-            "RP Fork Release Notes 20260902.1 (Zed 1.17.2)"
+            "RP 20260902.1 (Zed 1.17.2 stable) Release Notes"
         );
     }
 

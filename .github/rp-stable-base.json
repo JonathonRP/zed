@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "upstream_repository": "zed-industries/zed",
+  "upstream_tag": "v1.18.0",
+  "upstream_tag_commit": "49448afcab82f219b0ef4c58471cf81d23412475",
+  "upstream_version": "1.18.0"
+}

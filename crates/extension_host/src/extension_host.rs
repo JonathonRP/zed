@@ -71,7 +71,6 @@ pub use extension::{
 };
 pub use extension_settings::ExtensionSettings;
 
-use crate::headless_host::hash_directory_contents;
 use crate::rp_extension_catalog::RpExtensionCatalogClient;
 
 pub const RELOAD_DEBOUNCE_DURATION: Duration = Duration::from_millis(200);
