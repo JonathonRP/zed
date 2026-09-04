@@ -106,7 +106,7 @@ Assert-Matches $bundle '(?s)\$cargoArguments = @\(\$Arguments\).*?\$cargoArgumen
     "The required sccache wrapper configuration must have final Cargo precedence"
 Assert-Matches $bundle '\$env:SCCACHE_IDLE_TIMEOUT = "0"' `
     "RP Windows packaging must retain sccache statistics across long linker phases"
-Assert-Matches $bundle '(?s)--show-stats --stats-format json \| Out-Null.*?--stop-server \| Out-Null.*?--start-server.*?--zero-stats' `
+Assert-Matches $bundle '(?s)Get-Process -Name "sccache".*?--stop-server \| Out-Null.*?--start-server.*?--zero-stats' `
     "RP Windows packaging must restart sccache with the disabled idle timeout"
 Assert-Matches $releaseWorkflow '(?s)package_windows:.*?Set up sccache.*?disable_annotations: true.*?Pin sccache wrapper path' `
     "RP Windows packaging must disable the action post-run that would restart sccache after cleanup"
