@@ -82,11 +82,12 @@ $script:cargoRustcWrapperConfig = $null
 function Invoke-BundleCargo {
     param([string[]]$Arguments)
 
-    $cargoArguments = @()
+    $cargoArguments = @($Arguments)
     if ($script:cargoRustcWrapperConfig) {
+        # Cargo merges --config values from left to right. Keep the required
+        # wrapper last so package-specific configuration cannot override it.
         $cargoArguments += @("--config", $script:cargoRustcWrapperConfig)
     }
-    $cargoArguments += $Arguments
     cargo @cargoArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Cargo failed with exit code $LASTEXITCODE"
@@ -110,10 +111,20 @@ if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
     $env:RUSTC_WRAPPER = $requiredRustcWrapper
     $env:CARGO_BUILD_RUSTC_WRAPPER = $requiredRustcWrapper
     $env:SCCACHE_PATH = $requiredRustcWrapper
+    # Windows release links can exceed sccache's 600-second default idle
+    # timeout after the last cacheable compile. Keep the daemon alive so the
+    # final production statistics are not replaced by a fresh zeroed server.
+    $env:SCCACHE_IDLE_TIMEOUT = "0"
     $script:cargoRustcWrapperConfig = "build.rustc-wrapper='$requiredRustcWrapper'"
 
     Write-Host "RP Windows sccache wrapper: $requiredRustcWrapper"
+    Write-Host "RP Windows sccache idle timeout: $env:SCCACHE_IDLE_TIMEOUT (disabled)"
     & $requiredRustcWrapper --version
+    # Connect (starting a server if needed), then replace it so persistent
+    # runners cannot reuse a daemon that was born with the default timeout.
+    & $requiredRustcWrapper --show-stats --stats-format json | Out-Null
+    & $requiredRustcWrapper --stop-server | Out-Null
+    & $requiredRustcWrapper --start-server
     & $requiredRustcWrapper --zero-stats
 
     $probeDir = Join-Path $env:RUNNER_TEMP "rp-sccache-probe"
@@ -177,6 +188,43 @@ function Assert-RpSccacheBuild {
             "- Probe requests excluded: yes"
         ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
     }
+}
+
+function Test-RpSccacheProductionPath {
+    if ([string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
+        return
+    }
+
+    $preflightTargetDir = Join-Path $env:RUNNER_TEMP "rp-sccache-production-preflight"
+    if (Test-Path -LiteralPath $preflightTargetDir) {
+        Remove-Item -LiteralPath $preflightTargetDir -Recurse -Force
+    }
+
+    & $requiredRustcWrapper --zero-stats
+    Write-Host "Testing the production Cargo configuration before the full Windows build"
+    Invoke-BundleCargo -Arguments @(
+        "--config", ".cargo/bundle-config.toml",
+        "build",
+        "--release",
+        "--package", "refineable",
+        "--target", $target,
+        "--target-dir", $preflightTargetDir
+    )
+
+    $preflightStats = (
+        & $requiredRustcWrapper --show-stats --stats-format json |
+            ConvertFrom-Json
+    )
+    $compileRequests = [int64]$preflightStats.stats.compile_requests
+    $requestsExecuted = [int64]$preflightStats.stats.requests_executed
+    Write-Host "RP Windows production-path preflight sccache statistics:"
+    & $requiredRustcWrapper --show-stats
+    if ($compileRequests -lt 1 -or $requestsExecuted -lt 1) {
+        throw "RP Windows production Cargo path bypassed sccache; refusing to start the full build"
+    }
+
+    & $requiredRustcWrapper --zero-stats
+    Write-Host "RP Windows sccache statistics reset; subsequent counts are release build only"
 }
 
 Push-Location -Path crates/zed
@@ -555,6 +603,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
     & $requiredRustcWrapper --zero-stats
     Write-Host "RP Windows sccache statistics reset after license generation"
 }
+Test-RpSccacheProductionPath
 BuildZedAndItsFriends
 BuildRemoteServer
 Assert-RpSccacheBuild
