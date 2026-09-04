@@ -93,6 +93,8 @@ jobs:
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+        with:
+          disable_annotations: true
 
       - name: Pin sccache wrapper path
         shell: pwsh
@@ -158,7 +160,12 @@ jobs:
       - name: Show sccache statistics
         if: always()
         shell: pwsh
-        run: '& $env:SCCACHE_PATH --show-stats'
+        run: |
+          try {
+            & $env:SCCACHE_PATH --show-stats
+          } finally {
+            & $env:SCCACHE_PATH --stop-server
+          }
 
       - name: Upload Windows packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

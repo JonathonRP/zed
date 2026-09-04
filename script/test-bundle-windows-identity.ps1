@@ -102,6 +102,18 @@ Assert-Matches $bundle '(?s)if \(\$isRpPackage\).*?\$definitions\["RpPackage"\] 
     "RP builds must define the Inno preprocessor guard"
 Assert-Matches $bundle '(?s)identity=Zed-ACP-Patched-RP-Stable.*?zed-rp-installer\.marker' `
     "RP marker source must be generated"
+Assert-Matches $bundle '(?s)\$cargoArguments = @\(\$Arguments\).*?\$cargoArguments \+= @\("--config", \$script:cargoRustcWrapperConfig\).*?cargo @cargoArguments' `
+    "The required sccache wrapper configuration must have final Cargo precedence"
+Assert-Matches $bundle '\$env:SCCACHE_IDLE_TIMEOUT = "0"' `
+    "RP Windows packaging must retain sccache statistics across long linker phases"
+Assert-Matches $bundle '(?s)--show-stats --stats-format json \| Out-Null.*?--stop-server \| Out-Null.*?--start-server.*?--zero-stats' `
+    "RP Windows packaging must restart sccache with the disabled idle timeout"
+Assert-Matches $releaseWorkflow '(?s)package_windows:.*?Set up sccache.*?disable_annotations: true.*?Pin sccache wrapper path' `
+    "RP Windows packaging must disable the action post-run that would restart sccache after cleanup"
+Assert-Matches $bundle '(?s)function Test-RpSccacheProductionPath.*?"--config", "\.cargo/bundle-config\.toml".*?"--package", "refineable".*?production Cargo path bypassed sccache' `
+    "RP Windows packaging must fail fast when the production Cargo path bypasses sccache"
+Assert-Matches $bundle '(?s)GenerateLicenses.*?statistics reset after license generation.*?Test-RpSccacheProductionPath.*?BuildZedAndItsFriends' `
+    "The production-path sccache preflight must run before the expensive Windows build"
 if ($releaseWorkflow.Contains("remote/build-remote-server-binary")) {
     throw "RP release clients must download the matching published remote server, not build one from source"
 }
