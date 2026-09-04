@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
 
 concurrency:
   group: rp-upstream-main-sync
@@ -77,27 +76,32 @@ jobs:
               > "$RUNNER_TEMP/block-reason.txt"
             exit 1
           fi
-          git push fork "${NEW_SHA}:refs/heads/main"
+          response="$(
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+              -f branch=main
+          )"
+          merge_type="$(jq -r .merge_type <<<"$response")"
+          if [[ "$merge_type" != "fast-forward" && "$merge_type" != "none" ]]; then
+            echo "GitHub reported unexpected fork sync type $merge_type." \
+              > "$RUNNER_TEMP/block-reason.txt"
+            exit 1
+          fi
+          updated_sha="$(
+            git ls-remote --exit-code fork refs/heads/main | cut -f1
+          )"
+          if [[ "$updated_sha" != "$NEW_SHA" ]]; then
+            echo "Fork main resolved to $updated_sha instead of $NEW_SHA." \
+              > "$RUNNER_TEMP/block-reason.txt"
+            exit 1
+          fi
 
       - name: Write synchronization audit
         if: success()
         env:
-          GH_TOKEN: ${{ github.token }}
           OLD_SHA: ${{ steps.tips.outputs.old_sha }}
           NEW_SHA: ${{ steps.tips.outputs.new_sha }}
           UPDATED: ${{ steps.tips.outputs.update }}
         run: |
-          title="Fork main synchronization blocked"
-          issue="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" \
-              --jq ".[] | select(
-                .pull_request == null and .title == \"${title}\"
-              ) | .number" | head -n1
-          )"
-          if [[ -n "$issue" ]]; then
-            gh issue close "$issue" --repo "$GITHUB_REPOSITORY" \
-              --comment "The guarded fast-forward synchronization is healthy again."
-          fi
           {
             echo "## Fork main synchronization"
             echo
@@ -112,7 +116,6 @@ jobs:
       - name: Report blocked synchronization
         if: failure()
         env:
-          GH_TOKEN: ${{ github.token }}
           OLD_SHA: ${{ steps.tips.outputs.old_sha }}
           NEW_SHA: ${{ steps.tips.outputs.new_sha }}
         run: |
@@ -130,19 +133,4 @@ jobs:
             echo "- Upstream main: \`${NEW_SHA:-unknown}\`"
             echo
             echo "No force push or automatic divergence resolution was attempted."
-          } | tee "$RUNNER_TEMP/issue-body.md" >> "$GITHUB_STEP_SUMMARY"
-          title="Fork main synchronization blocked"
-          issue="$(
-            gh api "repos/${GITHUB_REPOSITORY}/issues?state=open&per_page=100" \
-              --jq ".[] | select(
-                .pull_request == null and .title == \"${title}\"
-              ) | .number" | head -n1
-          )"
-          if [[ -n "$issue" ]]; then
-            gh api --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/issues/${issue}" \
-              -F body=@"$RUNNER_TEMP/issue-body.md" >/dev/null
-          else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
-              --body-file "$RUNNER_TEMP/issue-body.md"
-          fi
+          } >> "$GITHUB_STEP_SUMMARY"
