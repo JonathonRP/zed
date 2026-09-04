@@ -73,6 +73,9 @@ def validate_base(base: Any, source: str) -> dict[str, Any]:
         )
     correction = base["initial_source_correction"]
     correction_keys = {
+        "new_upstream_commit",
+        "new_upstream_tag",
+        "new_upstream_version",
         "previous_rp_tip",
         "previous_upstream_commit",
         "previous_upstream_version",
@@ -81,11 +84,19 @@ def validate_base(base: Any, source: str) -> dict[str, Any]:
         raise StableBaseError(
             f"{source} must contain the initial source-correction identity"
         )
-    for key in ("previous_rp_tip", "previous_upstream_commit"):
+    for key in (
+        "new_upstream_commit",
+        "previous_rp_tip",
+        "previous_upstream_commit",
+    ):
         if not isinstance(correction[key], str) or not FULL_SHA.fullmatch(
             correction[key]
         ):
             raise StableBaseError(f"{source} has an invalid {key}")
+    new_correction_version = correction["new_upstream_version"]
+    parse_version(new_correction_version)
+    if correction["new_upstream_tag"] != f"v{new_correction_version}":
+        raise StableBaseError(f"{source} has an invalid source-correction target tag")
     parse_version(correction["previous_upstream_version"])
     if base["upstream_repository"] != UPSTREAM_REPOSITORY:
         raise StableBaseError(f"{source} must pin {UPSTREAM_REPOSITORY}")
@@ -186,6 +197,16 @@ def verify_transition(
         return
 
     correction = current["initial_source_correction"]
+    expected_target = {
+        "new_upstream_commit": current["upstream_tag_commit"],
+        "new_upstream_tag": current["upstream_tag"],
+        "new_upstream_version": current["upstream_version"],
+    }
+    actual_target = {key: correction[key] for key in expected_target}
+    if actual_target != expected_target:
+        raise StableBaseError(
+            "initial source correction does not match the pinned new stable base"
+        )
     if previous_sha != correction["previous_rp_tip"]:
         raise StableBaseError(
             "previous release has no stable-base metadata and does not match the "
@@ -196,6 +217,13 @@ def verify_transition(
         raise StableBaseError(
             f"previous RP tip contains Zed {previous_version}, not audited "
             f"{correction['previous_upstream_version']}"
+        )
+    previous_base_version = cargo_version_at(
+        repo, correction["previous_upstream_commit"]
+    )
+    if previous_base_version != correction["previous_upstream_version"]:
+        raise StableBaseError(
+            "audited unreleased-main commit does not match its declared version"
         )
     ancestry = subprocess.run(
         [

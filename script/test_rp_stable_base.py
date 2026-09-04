@@ -19,6 +19,9 @@ AUTOMATION = {
     "stable_sync_cron_utc": "0 0 * * *",
 }
 SOURCE_CORRECTION = {
+    "new_upstream_commit": PINNED_SHA,
+    "new_upstream_tag": "v1.18.0",
+    "new_upstream_version": "1.18.0",
     "previous_rp_tip": "b" * 40,
     "previous_upstream_commit": "c" * 40,
     "previous_upstream_version": "1.20.0",
@@ -194,6 +197,40 @@ class RepositoryVerificationTests(unittest.TestCase):
                 "upstream_version": "1.18.0",
             }
             with self.assertRaisesRegex(StableBaseError, "regresses"):
+                verify_transition(repo, current, previous_ref)
+
+    def test_initial_transition_requires_exact_audited_target(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repo = pathlib.Path(temporary_directory)
+            subprocess.run(["git", "init", "-q", repo], check=True)
+            subprocess.run(
+                ["git", "-C", repo, "config", "user.email", "rp@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", repo, "config", "user.name", "RP Test"], check=True
+            )
+            (repo / "crates/zed").mkdir(parents=True)
+            (repo / "crates/zed/Cargo.toml").write_text(
+                '[package]\nname = "zed"\nversion = "1.20.0"\n',
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "-C", repo, "add", "."], check=True)
+            subprocess.run(["git", "-C", repo, "commit", "-qm", "previous"], check=True)
+            previous_ref = subprocess.check_output(
+                ["git", "-C", repo, "rev-parse", "HEAD"], text=True
+            ).strip()
+            current = {
+                "upstream_tag": "v1.17.0",
+                "upstream_tag_commit": "d" * 40,
+                "upstream_version": "1.17.0",
+                "initial_source_correction": SOURCE_CORRECTION
+                | {
+                    "previous_rp_tip": previous_ref,
+                    "previous_upstream_commit": previous_ref,
+                },
+            }
+            with self.assertRaisesRegex(StableBaseError, "does not match"):
                 verify_transition(repo, current, previous_ref)
 
 
