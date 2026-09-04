@@ -222,6 +222,43 @@ jobs:
             target/zed-windows-x86_64-portable.zip `
             "target/zed-rp-stable-$version-windows-x86_64-portable.zip"
 
+          Remove-Item Env:ZED_RP_RELEASE_VERSION -ErrorAction SilentlyContinue
+          Remove-Item Env:ZED_RP_RELEASE_TAG -ErrorAction SilentlyContinue
+          Remove-Item Env:ZED_RP_UPSTREAM_TAG -ErrorAction SilentlyContinue
+          Remove-Item Env:ZED_RP_UPSTREAM_TAG_COMMIT -ErrorAction SilentlyContinue
+          Remove-Item Env:ZED_RP_RELEASE_NOTES -ErrorAction SilentlyContinue
+          Remove-Item Env:ZED_RP_RELEASE_NOTES_IDENTITY -ErrorAction SilentlyContinue
+          Remove-Item Env:ZED_RP_RELEASE_MANIFEST -ErrorAction SilentlyContinue
+          if (Get-ChildItem Env: | Where-Object Name -Like 'ZED_RP_*') {
+            throw "RP compile-time metadata remained set for the isolated client"
+          }
+
+          cargo --config .cargo/bundle-config.toml build `
+            --release `
+            --package zed `
+            --target x86_64-pc-windows-msvc
+          $isolatedClient = "target/Zed-rp-profile-compatibility-isolated.exe"
+          Copy-Item -Force `
+            target/x86_64-pc-windows-msvc/release/zed.exe `
+            $isolatedClient
+          $isolatedSha256 = (
+            Get-FileHash -LiteralPath $isolatedClient -Algorithm SHA256
+          ).Hash.ToLowerInvariant()
+          [ordered]@{
+            expected_source_sha = $env:EXPECTED_SHA
+            upstream_stable_tag = $metadata.upstream_tag
+            upstream_stable_sha = $metadata.upstream_tag_commit
+            upstream_stable_version = $metadata.upstream_version
+            rp_compile_metadata = $false
+            app_identifier = "Zed-Editor-Stable"
+            purpose = "Run copied-profile compatibility checks without the RP singleton identity"
+            sha256 = $isolatedSha256
+          } |
+            ConvertTo-Json |
+            Set-Content `
+              -Path target/rp-profile-compatibility-isolated-identity.json `
+              -Encoding utf8
+
       - name: Show sccache statistics
         if: always()
         shell: pwsh
@@ -240,6 +277,8 @@ jobs:
             target/Zed-rp-stable-${{ needs.metadata.outputs.version }}-windows-x86_64.exe
             target/zed-rp-stable-${{ needs.metadata.outputs.version }}-windows-x86_64-portable.zip
             target/windows-source-identity.json
+            target/Zed-rp-profile-compatibility-isolated.exe
+            target/rp-profile-compatibility-isolated-identity.json
           if-no-files-found: error
           retention-days: 7
 

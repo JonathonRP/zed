@@ -109,6 +109,80 @@ class ProfileCompatibilityWorkflowTests(unittest.TestCase):
         self.assertNotIn("\n  publish:", self.contents)
         self.assertNotRegex(self.contents, r"(?m)^\s+environment:")
 
+    def test_isolated_client_clears_all_rp_compile_metadata_before_build(self):
+        production_bundle = self.contents.index(
+            "script/bundle-windows.ps1 -Architecture x86_64"
+        )
+        isolated_build = self.contents.index(
+            "cargo --config .cargo/bundle-config.toml build `\n"
+            "            --release `\n"
+            "            --package zed `\n"
+            "            --target x86_64-pc-windows-msvc"
+        )
+        self.assertLess(production_bundle, isolated_build)
+
+        rp_variables = (
+            "ZED_RP_RELEASE_VERSION",
+            "ZED_RP_RELEASE_TAG",
+            "ZED_RP_UPSTREAM_TAG",
+            "ZED_RP_UPSTREAM_TAG_COMMIT",
+            "ZED_RP_RELEASE_NOTES",
+            "ZED_RP_RELEASE_NOTES_IDENTITY",
+            "ZED_RP_RELEASE_MANIFEST",
+        )
+        for variable in rp_variables:
+            with self.subTest(variable=variable):
+                unset = self.contents.index(
+                    f"Remove-Item Env:{variable} -ErrorAction SilentlyContinue"
+                )
+                self.assertLess(production_bundle, unset)
+                self.assertLess(unset, isolated_build)
+        self.assertIn(
+            "Get-ChildItem Env: | Where-Object Name -Like 'ZED_RP_*'",
+            self.contents,
+        )
+
+    def test_isolated_client_has_hashed_official_identity_manifest(self):
+        self.assertIn(
+            "target/x86_64-pc-windows-msvc/release/zed.exe",
+            self.contents,
+        )
+        self.assertIn(
+            "target/Zed-rp-profile-compatibility-isolated.exe",
+            self.contents,
+        )
+        self.assertIn(
+            "Get-FileHash -LiteralPath $isolatedClient -Algorithm SHA256",
+            self.contents,
+        )
+        for field in (
+            "expected_source_sha = $env:EXPECTED_SHA",
+            "upstream_stable_tag = $metadata.upstream_tag",
+            "upstream_stable_sha = $metadata.upstream_tag_commit",
+            "upstream_stable_version = $metadata.upstream_version",
+            "rp_compile_metadata = $false",
+            'app_identifier = "Zed-Editor-Stable"',
+            "purpose = ",
+            "sha256 = $isolatedSha256",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, self.contents)
+        self.assertIn(
+            "target/rp-profile-compatibility-isolated-identity.json",
+            self.contents,
+        )
+        upload = self.contents.split(
+            "- name: Upload Windows compatibility packages", 1
+        )[1].split("\n  package_linux_remote_server:", 1)[0]
+        self.assertIn(
+            "target/Zed-rp-profile-compatibility-isolated.exe",
+            upload,
+        )
+        self.assertIn(
+            "target/rp-profile-compatibility-isolated-identity.json",
+            upload,
+        )
+
     def test_workflow_cannot_publish_or_mutate_repository_state(self):
         forbidden = (
             "git push",
