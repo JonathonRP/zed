@@ -1,0 +1,183 @@
+name: RP upstream stable sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 12 * * 1"
+  pull_request:
+    branches:
+      - release/rp-stable
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rp-upstream-stable-sync
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    if: >-
+      github.repository == 'JonathonRP/zed' &&
+      github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout trusted RP release branch
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: release/rp-stable
+          fetch-depth: 0
+          fetch-tags: false
+          persist-credentials: false
+
+      - name: Verify current base and discover official stable
+        id: stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "JonathonRP/zed"
+          current_tag="$(
+            python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])'
+          )"
+          [[ "$current_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git fetch --no-tags https://github.com/zed-industries/zed.git \
+            "refs/tags/${current_tag}:refs/tags/${current_tag}"
+          python3 script/rp_stable_base.py verify
+
+          gh api repos/zed-industries/zed/releases/latest > "$RUNNER_TEMP/latest.json"
+          candidate_tag="$(
+            python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' \
+              "$RUNNER_TEMP/latest.json"
+          )"
+          [[ "$candidate_tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git fetch --no-tags https://github.com/zed-industries/zed.git \
+            "refs/tags/${candidate_tag}:refs/tags/${candidate_tag}"
+          python3 script/rp_stable_base.py candidate \
+            --release-json "$RUNNER_TEMP/latest.json" \
+            --output "$RUNNER_TEMP/candidate-base.json" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Rebase RP patch series onto new stable
+        if: steps.stable.outputs.update == 'true'
+        env:
+          NEW_SHA: ${{ steps.stable.outputs.new_sha }}
+          OLD_SHA: ${{ steps.stable.outputs.old_sha }}
+          NEW_TAG: ${{ steps.stable.outputs.new_tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          release_tip="$(git rev-parse release/rp-stable)"
+          git rebase --rebase-merges --onto "$NEW_SHA" "$OLD_SHA" release/rp-stable
+          cp "$RUNNER_TEMP/candidate-base.json" .github/rp-stable-base.json
+          git add .github/rp-stable-base.json
+          git commit -m "ci: track upstream stable ${NEW_TAG} [skip ci]"
+          rebased_tip="$(git rev-parse HEAD)"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          integration_commit="$(
+            printf 'Prepare reviewed RP stable sync to %s\n' "$NEW_TAG" |
+              git commit-tree "$tree" -p "$release_tip" -p "$rebased_tip"
+          )"
+          git reset --hard "$integration_commit"
+
+      - name: Push deterministic sync branch
+        if: steps.stable.outputs.update == 'true'
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEW_VERSION: ${{ steps.stable.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          branch="automation/rp-stable-v${NEW_VERSION}"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          expected="$(git ls-remote "$remote" "refs/heads/${branch}" | cut -f1)"
+          git branch -f "$branch" HEAD
+          git push "$remote" "$branch:$branch" \
+            "--force-with-lease=refs/heads/${branch}:${expected}"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update review PR
+        if: steps.stable.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.push.outputs.branch }}
+          OLD_TAG: ${{ steps.stable.outputs.old_tag }}
+          OLD_SHA: ${{ steps.stable.outputs.old_sha }}
+          OLD_VERSION: ${{ steps.stable.outputs.old_version }}
+          NEW_TAG: ${{ steps.stable.outputs.new_tag }}
+          NEW_SHA: ${{ steps.stable.outputs.new_sha }}
+          NEW_VERSION: ${{ steps.stable.outputs.new_version }}
+        run: |
+          set -euo pipefail
+          title="Track official Zed stable ${NEW_TAG}"
+          body="$RUNNER_TEMP/pr-body.md"
+          cat > "$body" <<EOF
+          Updates the reviewed RP release line to the latest official, non-draft,
+          non-prerelease Zed release.
+
+          | | Previous | Proposed |
+          |---|---|---|
+          | Tag | \`${OLD_TAG}\` | \`${NEW_TAG}\` |
+          | Commit | \`${OLD_SHA}\` | \`${NEW_SHA}\` |
+          | Zed version | \`${OLD_VERSION}\` | \`${NEW_VERSION}\` |
+
+          The RP-only series was recreated with \`git rebase --rebase-merges\`.
+          This PR must pass focused provenance, release metadata, updater, and
+          compatibility tests and be merged normally. It is never auto-merged
+          and this workflow never publishes a release.
+          EOF
+          pr="$(
+            gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --base release/rp-stable \
+              --head "$BRANCH" \
+              --state open \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+          if [[ -n "$pr" ]]; then
+            gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --body-file "$body"
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" \
+              --base release/rp-stable \
+              --head "$BRANCH" \
+              --title "$title" \
+              --body-file "$body"
+          fi
+
+  validate:
+    if: >-
+      github.repository == 'JonathonRP/zed' &&
+      github.event_name == 'pull_request' &&
+      startsWith(github.head_ref, 'automation/rp-stable-v')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout proposed stable sync
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: false
+
+      - name: Verify provenance and compatibility
+        run: |
+          set -euo pipefail
+          tag="$(
+            python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])'
+          )"
+          [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git fetch --no-tags https://github.com/zed-industries/zed.git \
+            "refs/tags/${tag}:refs/tags/${tag}"
+          python3 script/rp_stable_base.py verify
+          python3 -m unittest discover -s script -p 'test_rp*.py'
+          cargo test -p release_channel
+          cargo test -p auto_update rp_
