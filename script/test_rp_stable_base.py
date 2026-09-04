@@ -105,6 +105,15 @@ class StableBaseTests(unittest.TestCase):
         self.assertNotIn("--force", contents)
         self.assertNotIn("actions/checkout", contents)
 
+    def test_stable_sync_dispatches_read_only_validation_for_bot_prs(self):
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        contents = (repo / ".github/workflows/rp_stable_sync.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("actions: write", contents)
+        self.assertIn("-f operation=validate", contents)
+        self.assertIn("inputs.operation == 'validate'", contents)
+
 
 class RepositoryVerificationTests(unittest.TestCase):
     def test_repository_pins_tag_commit_cargo_version_and_app_version(self):
