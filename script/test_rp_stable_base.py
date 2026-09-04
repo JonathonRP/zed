@@ -101,8 +101,9 @@ class StableBaseTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("github.repository == 'JonathonRP/zed'", contents)
         self.assertIn('git merge-base --is-ancestor "$old_sha" "$new_sha"', contents)
-        self.assertIn('"repos/${GITHUB_REPOSITORY}/merge-upstream"', contents)
-        self.assertIn('"$merge_type" != "fast-forward"', contents)
+        self.assertIn("RP_MAIN_SYNC_DEPLOY_KEY", contents)
+        self.assertIn('git push fork "${NEW_SHA}:refs/heads/main"', contents)
+        self.assertIn("contents: read", contents)
         self.assertNotIn("--force", contents)
         self.assertNotIn("actions/checkout", contents)
 
