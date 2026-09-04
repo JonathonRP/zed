@@ -1,0 +1,339 @@
+name: RP copied-profile compatibility build
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Fixed RP copied-profile source branch
+        required: true
+        type: choice
+        options:
+          - jonathonrp-track-zed-stable
+      expected_sha:
+        description: Full commit SHA expected at the fixed source branch tip
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rp-profile-compatibility-${{ inputs.expected_sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  metadata:
+    name: Verify source and generate RP metadata
+    runs-on: ubuntu-22.04
+    outputs:
+      source_sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.allocate.outputs.version }}
+    steps:
+      - name: Guard repository and source inputs
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "JonathonRP/zed"
+          test "$SOURCE_REF" = "jonathonrp-track-zed-stable"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+
+      - name: Checkout fixed copied-profile source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: jonathonrp-track-zed-stable
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Verify exact source identity
+        id: source
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          expected_sha="${EXPECTED_SHA,,}"
+          source_sha="$(git rev-parse HEAD)"
+          test "$source_sha" = "$expected_sha"
+          git fetch --no-tags https://github.com/JonathonRP/zed.git \
+            "refs/heads/${SOURCE_REF}:refs/remotes/compatibility-source/${SOURCE_REF}"
+          source_branch="refs/remotes/compatibility-source/${SOURCE_REF}"
+          git cat-file -e "${expected_sha}^{commit}"
+          git merge-base --is-ancestor "$expected_sha" "$source_branch"
+          test "$(git rev-parse "$source_branch")" = "$source_sha"
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch all RP release tags
+        run: git fetch --force --tags https://github.com/JonathonRP/zed.git
+
+      - name: Verify pinned upstream stable base
+        run: |
+          set -euo pipefail
+          tag="$(
+            python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])'
+          )"
+          git fetch --no-tags https://github.com/zed-industries/zed.git \
+            "refs/tags/${tag}:refs/tags/${tag}"
+          python3 script/rp_stable_base.py verify --previous-ref HEAD^1
+
+      - name: Generate calendar version and release metadata
+        id: allocate
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          python3 script/rp_release_metadata.py \
+            --output-dir target/rp-release-metadata \
+            --github-output "$GITHUB_OUTPUT"
+          python3 -m json.tool \
+            target/rp-release-metadata/rp-release-manifest.json \
+            >/dev/null
+          manifest_sha="$(
+            python3 -c 'import json; print(json.load(open("target/rp-release-metadata/rp-release-manifest.json"))["commit"])'
+          )"
+          test "$manifest_sha" = "${EXPECTED_SHA,,}"
+
+      - name: Upload RP compatibility metadata
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rp-profile-compatibility-metadata-${{ steps.source.outputs.sha }}
+          path: target/rp-release-metadata/*
+          if-no-files-found: error
+          retention-days: 7
+
+  package_windows:
+    name: Build unsigned Windows x86_64 client
+    needs: metadata
+    runs-on: ${{ vars.ZED_WINDOWS_RUNNER || 'windows-2022' }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout exact copied-profile source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Download RP compatibility metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rp-profile-compatibility-metadata-${{ needs.metadata.outputs.source_sha }}
+          path: target/rp-release-metadata
+
+      - name: Cache Cargo sources
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+        with:
+          disable_annotations: true
+
+      - name: Pin sccache wrapper path
+        shell: pwsh
+        run: |
+          $sccachePath = "$env:SCCACHE_PATH.exe"
+          if (-not (Test-Path -LiteralPath $sccachePath -PathType Leaf)) {
+            throw "sccache action did not provide a valid SCCACHE_PATH"
+          }
+          @(
+            "SCCACHE_PATH=$sccachePath"
+            "RUSTC_WRAPPER=$sccachePath"
+            "CARGO_BUILD_RUSTC_WRAPPER=$sccachePath"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Select stable channel
+        shell: pwsh
+        run: '"stable" | Set-Content -NoNewline crates/zed/RELEASE_CHANNEL'
+
+      - name: Build unsigned installer and portable bundle
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ needs.metadata.outputs.source_sha }}
+          RP_VERSION: ${{ needs.metadata.outputs.version }}
+          ZED_REQUIRE_SCCACHE: "1"
+          ZED_CLIENT_CHECKSUM_SEED: fork-unsigned-stable
+        run: |
+          if ((git rev-parse HEAD) -ne $env:EXPECTED_SHA) {
+            throw "Windows checkout does not match the expected source commit"
+          }
+          $stableTag = (
+            Get-Content -Raw ".github/rp-stable-base.json" |
+              ConvertFrom-Json
+          ).upstream_tag
+          git fetch --no-tags https://github.com/zed-industries/zed.git `
+            "refs/tags/${stableTag}:refs/tags/${stableTag}"
+          python script/rp_stable_base.py verify
+
+          script/test-bundle-windows-identity.ps1
+
+          $metadataPath = "target/rp-release-metadata/rp-release-manifest.json"
+          $metadata = Get-Content -Raw $metadataPath | ConvertFrom-Json
+          if ($metadata.commit -ne $env:EXPECTED_SHA) {
+            throw "RP metadata does not match the expected source commit"
+          }
+          if ($metadata.calendar_version -ne $env:RP_VERSION) {
+            throw "RP metadata version does not match the workflow allocation"
+          }
+          $env:ZED_RP_RELEASE_VERSION = $metadata.calendar_version
+          $env:ZED_RP_RELEASE_TAG = $metadata.tag
+          $env:ZED_RP_UPSTREAM_TAG = $metadata.upstream_tag
+          $env:ZED_RP_UPSTREAM_TAG_COMMIT = $metadata.upstream_tag_commit
+          $env:ZED_RP_RELEASE_NOTES = Get-Content -Raw "target/rp-release-metadata/release-notes.md"
+          $env:ZED_RP_RELEASE_NOTES_IDENTITY = $metadata.notes_identity
+          $env:ZED_RP_RELEASE_MANIFEST = Get-Content -Raw $metadataPath
+          Copy-Item $metadataPath target/windows-source-identity.json
+
+          $bundleStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+          try {
+            script/bundle-windows.ps1 -Architecture x86_64
+          } finally {
+            $bundleStopwatch.Stop()
+            Write-Host "RP Windows compatibility build elapsed: $($bundleStopwatch.Elapsed)"
+          }
+          Compress-Archive `
+            -Path inno/x86_64/* `
+            -DestinationPath target/zed-windows-x86_64-portable.zip `
+            -CompressionLevel Optimal `
+            -Force
+
+          $version = $metadata.calendar_version
+          Move-Item -Force `
+            target/Zed-x86_64.exe `
+            "target/Zed-rp-stable-$version-windows-x86_64.exe"
+          Move-Item -Force `
+            target/zed-windows-x86_64-portable.zip `
+            "target/zed-rp-stable-$version-windows-x86_64-portable.zip"
+
+      - name: Show sccache statistics
+        if: always()
+        shell: pwsh
+        run: |
+          try {
+            & $env:SCCACHE_PATH --show-stats
+          } finally {
+            & $env:SCCACHE_PATH --stop-server
+          }
+
+      - name: Upload Windows compatibility packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rp-profile-compatibility-windows-x86_64-${{ needs.metadata.outputs.source_sha }}
+          path: |
+            target/Zed-rp-stable-${{ needs.metadata.outputs.version }}-windows-x86_64.exe
+            target/zed-rp-stable-${{ needs.metadata.outputs.version }}-windows-x86_64-portable.zip
+            target/windows-source-identity.json
+          if-no-files-found: error
+          retention-days: 7
+
+  package_linux_remote_server:
+    name: Build Linux x86_64 remote server
+    needs: metadata
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout exact copied-profile source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Download RP compatibility metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rp-profile-compatibility-metadata-${{ needs.metadata.outputs.source_sha }}
+          path: target/rp-release-metadata
+
+      - name: Cache Cargo sources
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+
+      - name: Pin sccache wrapper path
+        run: |
+          test -x "$SCCACHE_PATH"
+          printf 'RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build remote server
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          EXPECTED_SHA: ${{ needs.metadata.outputs.source_sha }}
+          RELEASE_CHANNEL: stable
+          RP_VERSION: ${{ needs.metadata.outputs.version }}
+          RUSTFLAGS: -C target-feature=+crt-static
+          ZED_RELEASE_CHANNEL: stable
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          tag="$(
+            python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])'
+          )"
+          git fetch --no-tags https://github.com/zed-industries/zed.git \
+            "refs/tags/${tag}:refs/tags/${tag}"
+          python3 script/rp_stable_base.py verify --previous-ref HEAD^1
+          manifest_sha="$(
+            python3 -c 'import json; print(json.load(open("target/rp-release-metadata/rp-release-manifest.json"))["commit"])'
+          )"
+          test "$manifest_sha" = "$EXPECTED_SHA"
+          cp target/rp-release-metadata/rp-release-manifest.json \
+            target/linux-source-identity.json
+
+          printf stable > crates/zed/RELEASE_CHANNEL
+          export RELEASE_VERSION="$(script/get-crate-version zed)"
+          build_start=$SECONDS
+          cargo --config .cargo/bundle-config.toml build \
+            --release \
+            --package remote_server \
+            --target x86_64-unknown-linux-musl
+          echo "RP Linux remote server build elapsed: $((SECONDS - build_start))s"
+          gzip_start=$SECONDS
+          gzip --best --stdout \
+            target/x86_64-unknown-linux-musl/release/remote_server \
+            > "target/zed-rp-stable-${RP_VERSION}-remote-server-linux-x86_64.gz"
+          echo "RP Linux remote server gzip elapsed: $((SECONDS - gzip_start))s"
+
+      - name: Show sccache statistics
+        if: always()
+        run: "${SCCACHE_PATH} --show-stats"
+
+      - name: Upload Linux remote server
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rp-profile-compatibility-linux-x86_64-${{ needs.metadata.outputs.source_sha }}
+          path: |
+            target/zed-rp-stable-${{ needs.metadata.outputs.version }}-remote-server-linux-x86_64.gz
+            target/linux-source-identity.json
+          if-no-files-found: error
+          retention-days: 7
