@@ -116,6 +116,21 @@ class StableBaseTests(unittest.TestCase):
         self.assertIn("-f operation=validate", contents)
         self.assertIn("inputs.operation == 'validate'", contents)
 
+    def test_release_bundle_cargo_config_is_present(self):
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        bundle_script = (repo / "script/bundle-windows.ps1").read_text(
+            encoding="utf-8"
+        )
+        release_workflow = (
+            repo / ".github/workflows/fork_stable_release.yml"
+        ).read_text(encoding="utf-8")
+        config = (repo / ".cargo/bundle-config.toml").read_text(encoding="utf-8")
+
+        self.assertIn(".cargo/bundle-config.toml", bundle_script)
+        self.assertIn(".cargo/bundle-config.toml", release_workflow)
+        self.assertIn('RUSTC_BOOTSTRAP = "1"', config)
+        self.assertIn('rustflags = ["-Z", "share-generics=y"]', config)
+
 
 class RepositoryVerificationTests(unittest.TestCase):
     def test_repository_pins_tag_commit_cargo_version_and_app_version(self):
