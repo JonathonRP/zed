@@ -1,8 +1,5 @@
 #![cfg_attr(target_family = "wasm", no_main)]
 
-#[path = "example_support/fonts.rs"]
-mod example_support;
-
 use gpui::{
     App, Bounds, Context, Div, ElementId, FocusHandle, KeyBinding, SharedString, Stateful, Window,
     WindowBounds, WindowOptions, actions, div, prelude::*, px, size,
@@ -185,9 +182,6 @@ impl Render for Example {
 
 fn run_example() {
     application().run(|cx: &mut App| {
-        if !example_support::load_fonts(cx) {
-            return;
-        }
         cx.bind_keys([
             KeyBinding::new("tab", Tab, None),
             KeyBinding::new("shift-tab", TabPrev, None),

@@ -1,8 +1,5 @@
 #![cfg_attr(target_family = "wasm", no_main)]
 
-#[path = "example_support/fonts.rs"]
-mod example_support;
-
 use gpui::{
     App, AppContext, Bounds, Context, Window, WindowBounds, WindowOptions, div, linear_color_stop,
     linear_gradient, pattern_slash, prelude::*, px, rgb, size,
@@ -106,9 +103,6 @@ impl Render for PatternExample {
 
 fn run_example() {
     application().run(|cx: &mut App| {
-        if !example_support::load_fonts(cx) {
-            return;
-        }
         let bounds = Bounds::centered(None, size(px(600.0), px(600.0)), cx);
         cx.open_window(
             WindowOptions {

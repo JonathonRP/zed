@@ -15,6 +15,8 @@ import sys
 import urllib.parse
 from collections.abc import Iterable
 
+from rp_stable_base import BASE_PATH, StableBaseError, verify_base
+
 
 CALENDAR_TAG = re.compile(r"^rp-stable-(?P<date>[0-9]{8})\.(?P<patch>[1-9][0-9]*)$")
 
@@ -202,15 +204,20 @@ def select_fragments(
 def render_notes(
     repo: pathlib.Path,
     version: str,
-    upstream_version: str,
+    stable_base: dict[str, object],
     commit: str,
     fragments: list[dict[str, str]],
 ) -> str:
     sections = [
-        f"# RP Fork Release Notes {version}",
+        f"# RP {version} (Zed {stable_base['upstream_version']} stable)",
         "",
-        f"- **Upstream Zed version:** `{upstream_version}`",
-        f"- **Source commit:** `{commit}`",
+        f"- **Upstream stable tag:** `{stable_base['upstream_tag']}`",
+        f"- **Upstream stable commit:** `{stable_base['upstream_tag_commit']}`",
+        f"- **RP source commit:** `{commit}`",
+        (
+            "- **Compatibility identity:** "
+            f"`{stable_base['upstream_tag_commit']}+rp.{commit}`"
+        ),
         "",
     ]
     if fragments:
@@ -244,29 +251,22 @@ def generate_metadata(
     github_output: pathlib.Path | None,
 ) -> None:
     current_commit = run_git(repo, "rev-parse", "HEAD")
+    stable_base = verify_base(repo, repo / BASE_PATH)
     raw_tags = read_tags(repo)
     calendar_tags = parse_calendar_tags(raw_tags)
     allocation = allocate_calendar_version(current_commit, utc_date, raw_tags)
     previous_tag = find_previous_calendar_tag(repo, current_commit, calendar_tags)
     fragments = select_fragments(repo, load_fragment_manifest(repo), previous_tag)
-    upstream_version = run_git(repo, "show", "HEAD:crates/zed/Cargo.toml")
-    version_match = re.search(
-        r"(?m)^version\s*=\s*\"([^\"]+)\"\s*$", upstream_version
-    )
-    if version_match is None:
-        raise MetadataError("could not read the zed package version")
-    upstream_version = version_match.group(1)
-
-    notes = render_notes(
-        repo, allocation.version, upstream_version, current_commit, fragments
-    )
+    notes = render_notes(repo, allocation.version, stable_base, current_commit, fragments)
     notes_identity = hashlib.sha256(notes.encode("utf-8")).hexdigest()
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "channel": "rp-stable",
         "calendar_version": allocation.version,
         "tag": allocation.tag,
-        "upstream_version": upstream_version,
+        "upstream_tag": stable_base["upstream_tag"],
+        "upstream_tag_commit": stable_base["upstream_tag_commit"],
+        "upstream_version": stable_base["upstream_version"],
         "commit": current_commit,
         "trust": {"signed": False, "label": "unsigned"},
         "notes_identity": f"sha256:{notes_identity}",
@@ -342,6 +342,8 @@ def finalize_update_manifest(
         "calendar_version",
         "tag",
         "upstream_version",
+        "upstream_tag",
+        "upstream_tag_commit",
         "commit",
         "trust",
         "notes_identity",
@@ -352,8 +354,8 @@ def finalize_update_manifest(
         raise MetadataError(
             f"{metadata_path} is missing required fields: {', '.join(missing)}"
         )
-    if metadata["schema_version"] != 1 or metadata["channel"] != "rp-stable":
-        raise MetadataError(f"{metadata_path} is not an RP stable schema version 1 manifest")
+    if metadata["schema_version"] != 2 or metadata["channel"] != "rp-stable":
+        raise MetadataError(f"{metadata_path} is not an RP stable schema version 2 manifest")
     if metadata["trust"] != {"signed": False, "label": "unsigned"}:
         raise MetadataError(f"{metadata_path} must explicitly describe unsigned assets")
     version = metadata["calendar_version"]
@@ -369,6 +371,10 @@ def finalize_update_manifest(
         metadata["upstream_version"],
     ) is None:
         raise MetadataError(f"{metadata_path} has invalid upstream semver")
+    if metadata["upstream_tag"] != f"v{metadata['upstream_version']}":
+        raise MetadataError(f"{metadata_path} upstream tag does not match its version")
+    if re.fullmatch(r"[0-9a-f]{40}", metadata["upstream_tag_commit"]) is None:
+        raise MetadataError(f"{metadata_path} has invalid upstream tag commit")
     if re.fullmatch(r"sha256:[0-9a-f]{64}", metadata["notes_identity"]) is None:
         raise MetadataError(f"{metadata_path} has invalid release-notes identity")
     if metadata["asset_names"] != release_asset_names(version):
@@ -397,6 +403,8 @@ def finalize_update_manifest(
             "channel",
             "calendar_version",
             "upstream_version",
+            "upstream_tag",
+            "upstream_tag_commit",
             "commit",
             "tag",
             "trust",
@@ -459,7 +467,7 @@ def main() -> int:
                 args.date,
                 args.github_output,
             )
-    except (MetadataError, OSError, json.JSONDecodeError) as error:
+    except (MetadataError, StableBaseError, OSError, json.JSONDecodeError) as error:
         print(f"RP release metadata error: {error}", file=sys.stderr)
         return 1
     return 0

@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "automation": {
+    "fork_main_sync_cron_utc": "0 0 * * *",
+    "stable_sync_cron_utc": "0 0 * * *"
+  },
+  "initial_source_correction": {
+    "new_upstream_commit": "49448afcab82f219b0ef4c58471cf81d23412475",
+    "new_upstream_tag": "v1.18.0",
+    "new_upstream_version": "1.18.0",
+    "previous_rp_tip": "ed3c01b116dd0126cf8ec5de9d00311da1051f20",
+    "previous_upstream_commit": "63e31fb7af375fdcb179ffeb9de04590aec8d3b2",
+    "previous_upstream_version": "1.20.0"
+  },
+  "upstream_repository": "zed-industries/zed",
+  "upstream_tag": "v1.18.0",
+  "upstream_tag_commit": "49448afcab82f219b0ef4c58471cf81d23412475",
+  "upstream_version": "1.18.0"
+}

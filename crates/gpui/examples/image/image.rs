@@ -1,8 +1,5 @@
 #![cfg_attr(target_family = "wasm", no_main)]
 
-#[path = "../example_support/fonts.rs"]
-mod example_support;
-
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -162,9 +159,6 @@ fn run_example() {
         base: manifest_dir.join("examples"),
     })
     .run(move |cx: &mut App| {
-        if !example_support::load_fonts(cx) {
-            return;
-        }
         #[cfg(not(target_family = "wasm"))]
         {
             let http_client = ReqwestClient::user_agent("gpui example").unwrap();

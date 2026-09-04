@@ -452,14 +452,7 @@ pub enum FunctionCallingMode {
 pub struct FunctionDeclaration {
     pub name: String,
     pub description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parameters: Option<serde_json::Value>,
-    #[serde(
-        rename = "parametersJsonSchema",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub parameters_json_schema: Option<serde_json::Value>,
+    pub parameters: serde_json::Value,
 }
 
 #[derive(Debug, Default)]

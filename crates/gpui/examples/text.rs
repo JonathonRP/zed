@@ -1,8 +1,5 @@
 #![cfg_attr(target_family = "wasm", no_main)]
 
-#[path = "example_support/fonts.rs"]
-mod example_support;
-
 use std::{
     borrow::Cow,
     ops::{Deref, DerefMut},
@@ -351,9 +348,6 @@ impl Render for TextExample {
 
 fn run_example() {
     application().run(|cx: &mut App| {
-        if !example_support::load_fonts(cx) {
-            return;
-        }
         cx.set_menus(vec![Menu {
             name: "GPUI Typography".into(),
             disabled: false,

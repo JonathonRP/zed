@@ -800,8 +800,8 @@ impl<T: NumberFieldType> RenderOnce for NumberField<T> {
                                         })
                                         .child(editor)
                                         .on_action::<menu::Confirm>({
-                                            move |_, window, cx| {
-                                                window.blur(cx);
+                                            move |_, window, _| {
+                                                window.blur();
                                             }
                                         })
                                         .into_any_element()

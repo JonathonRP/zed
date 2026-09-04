@@ -246,6 +246,7 @@ async fn build_remote_server_from_source(
     cx: &mut AsyncApp,
 ) -> Result<Option<std::path::PathBuf>> {
     use std::env::VarError;
+    use std::path::Path;
     use util::command::{Command, Stdio, new_command};
 
     if let Ok(path) = std::env::var("ZED_COPY_REMOTE_SERVER") {
@@ -327,10 +328,7 @@ async fn build_remote_server_from_source(
         log::info!("building remote server binary from source");
         run_cmd(
             new_command("cargo")
-                .current_dir(
-                    util::dev_repo_root()
-                        .context("locating the zed checkout to build remote_server from source")?,
-                )
+                .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
                 .args([
                     "build",
                     "--package",
@@ -376,10 +374,7 @@ async fn build_remote_server_from_source(
         log::info!("building remote binary from source for {triple} with Zig");
         run_cmd(
             new_command("cargo")
-                .current_dir(
-                    util::dev_repo_root()
-                        .context("locating the zed checkout to build remote_server from source")?,
-                )
+                .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
                 .args([
                     "zigbuild",
                     "--package",
@@ -395,8 +390,7 @@ async fn build_remote_server_from_source(
         )
         .await?;
     };
-    let bin_path = util::dev_repo_root()
-        .context("locating the zed checkout that built remote_server from source")?
+    let bin_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .join("target")
         .join("remote_server")
         .join(&triple)

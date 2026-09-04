@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use fs::Fs;
-use gpui::{App, EntityId, Global, ReadGlobal, SharedString, Task};
+use gpui::{App, Global, ReadGlobal, SharedString, Task};
 use language::{BinaryStatus, LanguageLoader, LanguageMatcher, LanguageName};
 use lsp::LanguageServerName;
 use parking_lot::RwLock;
@@ -235,9 +235,7 @@ pub trait ExtensionLanguageProxy: Send + Sync + 'static {
         matcher: Arc<LanguageMatcher>,
         hidden: bool,
         load: LanguageLoader,
-    ) -> bool;
-
-    fn is_language_registered(&self, language: &LanguageName) -> bool;
+    );
 
     fn remove_languages(
         &self,
@@ -255,20 +253,12 @@ impl ExtensionLanguageProxy for ExtensionHostProxy {
         matcher: Arc<LanguageMatcher>,
         hidden: bool,
         load: LanguageLoader,
-    ) -> bool {
+    ) {
         let Some(proxy) = self.language_proxy.read().clone() else {
-            return false;
+            return;
         };
 
         proxy.register_language(language, grammar, matcher, hidden, load)
-    }
-
-    fn is_language_registered(&self, language: &LanguageName) -> bool {
-        let Some(proxy) = self.language_proxy.read().clone() else {
-            return false;
-        };
-
-        proxy.is_language_registered(language)
     }
 
     fn remove_languages(
@@ -301,7 +291,6 @@ pub trait ExtensionLanguageServerProxy: Send + Sync + 'static {
 
     fn update_language_server_status(
         &self,
-        source: Option<EntityId>,
         language_server_id: LanguageServerName,
         status: BinaryStatus,
     );
@@ -336,7 +325,6 @@ impl ExtensionLanguageServerProxy for ExtensionHostProxy {
 
     fn update_language_server_status(
         &self,
-        source: Option<EntityId>,
         language_server_id: LanguageServerName,
         status: BinaryStatus,
     ) {
@@ -344,7 +332,7 @@ impl ExtensionLanguageServerProxy for ExtensionHostProxy {
             return;
         };
 
-        proxy.update_language_server_status(source, language_server_id, status)
+        proxy.update_language_server_status(language_server_id, status)
     }
 }
 

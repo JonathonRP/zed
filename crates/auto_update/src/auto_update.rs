@@ -98,6 +98,8 @@ struct RpUpdateManifest {
     channel: String,
     calendar_version: String,
     upstream_version: String,
+    upstream_tag: String,
+    upstream_tag_commit: String,
     commit: String,
     tag: String,
     trust: RpTrust,
@@ -143,6 +145,8 @@ struct RpCandidateIdentity {
     tag: String,
     commit: String,
     upstream_version: Version,
+    upstream_tag: String,
+    upstream_tag_commit: String,
     installer_sha256: String,
 }
 
@@ -159,6 +163,20 @@ struct RpCompileIdentity {
     tag: String,
     commit: String,
     upstream_version: Version,
+    upstream_tag: String,
+    upstream_tag_commit: String,
+}
+
+#[derive(Deserialize)]
+struct RpEmbeddedIdentity {
+    schema_version: u32,
+    channel: String,
+    calendar_version: String,
+    tag: String,
+    upstream_version: String,
+    upstream_tag: String,
+    upstream_tag_commit: String,
+    commit: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -634,12 +652,30 @@ impl RpCompileIdentity {
                 && is_lower_hex(&metadata.notes_identity["sha256:".len()..], 64),
             "compiled RP release-notes identity is invalid"
         );
+        let embedded: RpEmbeddedIdentity =
+            serde_json::from_str(metadata.manifest).context("compiled RP manifest is invalid")?;
+        let normalized_upstream_version = normalized_upstream_version(upstream_version);
+        anyhow::ensure!(
+            embedded.schema_version == 2
+                && embedded.channel == "rp-stable"
+                && embedded.calendar_version == metadata.calendar_version
+                && embedded.tag == metadata.release_tag
+                && embedded.commit == commit
+                && embedded.upstream_version == normalized_upstream_version.to_string()
+                && embedded.upstream_tag == format!("v{}", normalized_upstream_version)
+                && embedded.upstream_tag == metadata.upstream_tag
+                && embedded.upstream_tag_commit == metadata.upstream_tag_commit
+                && is_lower_hex(&embedded.upstream_tag_commit, 40),
+            "compiled RP manifest does not match the build identity"
+        );
         Ok(Self {
             calendar,
             calendar_version: metadata.calendar_version.to_string(),
             tag: metadata.release_tag.to_string(),
             commit,
-            upstream_version: normalized_upstream_version(upstream_version),
+            upstream_version: normalized_upstream_version,
+            upstream_tag: embedded.upstream_tag,
+            upstream_tag_commit: embedded.upstream_tag_commit,
         })
     }
 }
@@ -663,7 +699,7 @@ fn expected_rp_asset_url(tag: &str, name: &str) -> String {
 
 fn validate_rp_manifest(manifest: RpUpdateManifest) -> Result<ValidatedRpManifest> {
     anyhow::ensure!(
-        manifest.schema_version == 1,
+        manifest.schema_version == 2,
         "unsupported RP manifest schema"
     );
     anyhow::ensure!(
@@ -680,6 +716,14 @@ fn validate_rp_manifest(manifest: RpUpdateManifest) -> Result<ValidatedRpManifes
         .upstream_version
         .parse::<Version>()
         .context("RP manifest has an invalid upstream semver")?;
+    anyhow::ensure!(
+        manifest.upstream_tag == format!("v{upstream_version}"),
+        "RP manifest upstream tag does not match its semantic version"
+    );
+    anyhow::ensure!(
+        is_lower_hex(&manifest.upstream_tag_commit, 40),
+        "RP manifest upstream tag commit must be a lowercase full SHA"
+    );
     anyhow::ensure!(
         is_lower_hex(&manifest.commit, 40),
         "RP manifest commit must be a lowercase full SHA"
@@ -740,6 +784,8 @@ fn validate_rp_manifest(manifest: RpUpdateManifest) -> Result<ValidatedRpManifes
         tag: manifest.tag.clone(),
         commit: manifest.commit.clone(),
         upstream_version,
+        upstream_tag: manifest.upstream_tag.clone(),
+        upstream_tag_commit: manifest.upstream_tag_commit.clone(),
         installer_sha256: manifest.assets.windows_x86_64_installer.sha256.clone(),
     };
     Ok(ValidatedRpManifest { manifest, identity })
@@ -941,10 +987,6 @@ fn newer_rp_candidate(
     staged: Option<&RpCandidateIdentity>,
     candidate: &RpCandidateIdentity,
 ) -> Result<bool> {
-    anyhow::ensure!(
-        candidate.upstream_version >= installed.upstream_version,
-        "RP candidate upstream version would downgrade the installed upstream version"
-    );
     let minimum_calendar = staged
         .map(|staged| staged.calendar.max(installed.calendar))
         .unwrap_or(installed.calendar);
@@ -963,7 +1005,9 @@ fn validate_matching_remote_manifest(
             && candidate.identity.calendar_version == installed.calendar_version
             && candidate.identity.tag == installed.tag
             && candidate.identity.commit == installed.commit
-            && candidate.identity.upstream_version == installed.upstream_version,
+            && candidate.identity.upstream_version == installed.upstream_version
+            && candidate.identity.upstream_tag == installed.upstream_tag
+            && candidate.identity.upstream_tag_commit == installed.upstream_tag_commit,
         "RP remote-server manifest does not exactly match the running RP build"
     );
     Ok(())
@@ -2424,10 +2468,12 @@ mod tests {
             })
         };
         serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "channel": "rp-stable",
             "calendar_version": calendar,
             "upstream_version": upstream,
+            "upstream_tag": format!("v{upstream}"),
+            "upstream_tag_commit": "fedcba9876543210fedcba9876543210fedcba98",
             "commit": TEST_COMMIT,
             "tag": tag,
             "trust": {"signed": false, "label": "unsigned"},
@@ -2452,6 +2498,8 @@ mod tests {
             tag: format!("rp-stable-{calendar}"),
             commit: TEST_COMMIT.to_string(),
             upstream_version: upstream.parse().unwrap(),
+            upstream_tag: format!("v{upstream}"),
+            upstream_tag_commit: "fedcba9876543210fedcba9876543210fedcba98".to_string(),
         }
     }
 
@@ -2460,6 +2508,8 @@ mod tests {
         let metadata = RpReleaseMetadata {
             calendar_version: "20260902.1",
             release_tag: "rp-stable-20260902.1",
+            upstream_tag: "v1.2.3",
+            upstream_tag_commit: "fedcba9876543210fedcba9876543210fedcba98",
             release_notes: "",
             notes_identity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             manifest: "{}",
@@ -2499,8 +2549,8 @@ mod tests {
         assert!(newer_rp_candidate(&installed, None, &newer).unwrap());
         let higher_upstream = validated_sample("20260903.1", "1.3.0").unwrap().identity;
         assert!(newer_rp_candidate(&installed, None, &higher_upstream).unwrap());
-        let upstream_downgrade = validated_sample("20260903.1", "1.2.2").unwrap().identity;
-        assert!(newer_rp_candidate(&installed, None, &upstream_downgrade).is_err());
+        let stable_correction = validated_sample("20260903.1", "1.2.2").unwrap().identity;
+        assert!(newer_rp_candidate(&installed, None, &stable_correction).unwrap());
 
         let same = validated_sample("20260902.1", "1.2.3").unwrap().identity;
         assert!(!newer_rp_candidate(&installed, None, &same).unwrap());
@@ -2512,13 +2562,64 @@ mod tests {
     }
 
     #[test]
+    fn newer_rp_calendar_allows_main_to_stable_source_correction() {
+        let installed = compile_identity("20260904.1", "1.20.0");
+        let corrected = validated_sample("20260904.2", "1.18.0").unwrap().identity;
+        assert!(newer_rp_candidate(&installed, None, &corrected).unwrap());
+
+        let older_calendar = validated_sample("20260904.1", "1.21.0").unwrap().identity;
+        assert!(!newer_rp_candidate(&installed, None, &older_calendar).unwrap());
+    }
+
+    #[test]
+    fn compiled_rp_identity_requires_embedded_stable_base() {
+        let manifest = sample_manifest("20260904.2", "1.18.0").to_string();
+        let manifest = Box::leak(manifest.into_boxed_str());
+        let metadata = RpReleaseMetadata {
+            calendar_version: "20260904.2",
+            release_tag: "rp-stable-20260904.2",
+            upstream_tag: "v1.18.0",
+            upstream_tag_commit: "fedcba9876543210fedcba9876543210fedcba98",
+            release_notes: "",
+            notes_identity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            manifest,
+        };
+        assert!(
+            RpCompileIdentity::new(
+                metadata,
+                Version::parse("1.18.0+stable.test").unwrap(),
+                Some(TEST_COMMIT.to_string()),
+            )
+            .is_ok()
+        );
+
+        let mut mismatched = sample_manifest("20260904.2", "1.18.0");
+        mismatched["upstream_tag_commit"] = serde_json::json!("a".repeat(40));
+        let mismatched = Box::leak(mismatched.to_string().into_boxed_str());
+        let metadata = RpReleaseMetadata {
+            manifest: mismatched,
+            ..metadata
+        };
+        assert!(
+            RpCompileIdentity::new(
+                metadata,
+                Version::parse("1.18.0").unwrap(),
+                Some(TEST_COMMIT.to_string()),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn rp_manifest_is_strict_and_repository_bound() {
         assert!(validated_sample("20260902.1", "1.2.3").is_ok());
         for (pointer, replacement) in [
-            ("/schema_version", serde_json::json!(2)),
+            ("/schema_version", serde_json::json!(1)),
             ("/channel", serde_json::json!("stable")),
             ("/tag", serde_json::json!("rp-stable-20260903.1")),
             ("/upstream_version", serde_json::json!("not-semver")),
+            ("/upstream_tag", serde_json::json!("v1.2.4")),
+            ("/upstream_tag_commit", serde_json::json!("ABC")),
             ("/commit", serde_json::json!("ABC")),
             ("/trust/signed", serde_json::json!(true)),
             ("/trust/label", serde_json::json!("signed")),
@@ -2575,8 +2676,8 @@ mod tests {
         let duplicate_field = serde_json::to_string(&sample_manifest("20260902.1", "1.2.3"))
             .unwrap()
             .replacen(
-                r#""schema_version":1"#,
-                r#""schema_version":1,"schema_version":1"#,
+                r#""schema_version":2"#,
+                r#""schema_version":2,"schema_version":2"#,
                 1,
             );
         assert!(serde_json::from_str::<RpUpdateManifest>(&duplicate_field).is_err());

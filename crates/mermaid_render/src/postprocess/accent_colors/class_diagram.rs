@@ -1,5 +1,4 @@
 use anyhow::Result;
-use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 
 use super::{
@@ -39,7 +38,7 @@ impl ClassDiagramAccents {
                 }
 
                 let is_node = if let Some(class_attr) = e.try_get_attribute("class")? {
-                    let class = class_attr.normalized_value(XmlVersion::Implicit1_0)?;
+                    let class = class_attr.unescape_value()?;
                     class
                         .split_whitespace()
                         .any(|token| token == "node" || token == "stateGroup")

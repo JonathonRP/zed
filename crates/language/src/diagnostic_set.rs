@@ -178,7 +178,7 @@ impl DiagnosticEntry<PointUtf16> {
             code: self.diagnostic.code.clone(),
             severity: Some(self.diagnostic.severity),
             source: self.diagnostic.source.clone(),
-            message: self.diagnostic.message.to_lsp_message(),
+            message: self.diagnostic.message.clone(),
             data: self.diagnostic.data.clone(),
             related_information,
             ..Default::default()

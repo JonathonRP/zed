@@ -202,7 +202,9 @@ impl PickerDelegate for ExtensionVersionSelectorDelegate {
     }
 
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<Self>>) {
-        self.selector.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
+        self.selector
+            .update(cx, |_, cx| cx.emit(DismissEvent))
+            .log_err();
     }
 
     fn render_match(

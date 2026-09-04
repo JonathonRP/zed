@@ -348,15 +348,11 @@ impl LanguageModel for MistralLanguageModel {
                 Err(error) => return async move { Err(error.into()) }.boxed(),
             };
         let stream = self.stream_completion(request, affinity, cx);
-        let executor = cx.background_executor().clone();
 
         async move {
             let stream = stream.await?;
             let mapper = MistralEventMapper::new();
-            Ok(language_model::stream_in_background(
-                mapper.map_stream(stream).boxed(),
-                executor,
-            ))
+            Ok(mapper.map_stream(stream).boxed())
         }
         .boxed()
     }

@@ -20,7 +20,6 @@
       "ctrl-shift-l": "agent::AddSelectionToThread", // In cursor uses "Ask" mode
       "ctrl-l": "agent::AddSelectionToThread", // In cursor uses "Agent" mode
       "ctrl-k": "assistant::InlineAssist",
-      "shift-alt-h": "call_hierarchy::ShowIncomingCalls",
     },
   },
   {
@@ -78,13 +77,6 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-k": "assistant::InlineAssist",
-    },
-  },
-  {
-    "context": "CallHierarchyPicker > Picker > Editor",
-    "use_key_equivalents": true,
-    "bindings": {
-      "shift-alt-h": "call_hierarchy::ToggleDirection",
     },
   },
 ]

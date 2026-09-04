@@ -32,7 +32,7 @@ pub fn new_std_command(program: impl AsRef<OsStr>) -> std::process::Command {
 }
 
 #[cfg(target_os = "windows")]
-pub fn get_powershell() -> Option<String> {
+pub fn get_windows_system_shell() -> String {
     use std::path::PathBuf;
 
     fn find_pwsh_in_programfiles(find_alternate: bool, find_preview: bool) -> Option<PathBuf> {
@@ -71,7 +71,7 @@ pub fn get_powershell() -> Option<String> {
                 };
 
                 let exe_path = entry.path().join("pwsh.exe");
-                if exe_path.is_file() {
+                if exe_path.exists() {
                     Some((version, exe_path))
                 } else {
                     None
@@ -84,34 +84,41 @@ pub fn get_powershell() -> Option<String> {
     fn find_pwsh_in_msix(find_preview: bool) -> Option<PathBuf> {
         let msix_app_dir =
             PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Microsoft\\WindowsApps");
-        let package_family_name = if find_preview {
-            "Microsoft.PowerShellPreview_8wekyb3d8bbwe"
+        if !msix_app_dir.exists() {
+            return None;
+        }
+
+        let prefix = if find_preview {
+            "Microsoft.PowerShellPreview_"
         } else {
-            "Microsoft.PowerShell_8wekyb3d8bbwe"
+            "Microsoft.PowerShell_"
         };
-        let pwsh_exe = msix_app_dir.join(package_family_name).join("pwsh.exe");
-        pwsh_exe.exists().then_some(pwsh_exe)
+        msix_app_dir
+            .read_dir()
+            .ok()?
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                if !matches!(entry.file_type(), Ok(ft) if ft.is_dir()) {
+                    return None;
+                }
+
+                if !entry.file_name().to_string_lossy().starts_with(prefix) {
+                    return None;
+                }
+
+                let exe_path = entry.path().join("pwsh.exe");
+                exe_path.exists().then_some(exe_path)
+            })
+            .next()
     }
 
     fn find_pwsh_in_scoop() -> Option<PathBuf> {
         let pwsh_exe =
             PathBuf::from(std::env::var_os("USERPROFILE")?).join("scoop\\shims\\pwsh.exe");
-        pwsh_exe.is_file().then_some(pwsh_exe)
+        pwsh_exe.exists().then_some(pwsh_exe)
     }
 
-    fn find_pwsh_in_dotnet_tools() -> Option<PathBuf> {
-        let pwsh_exe =
-            PathBuf::from(std::env::var_os("USERPROFILE")?).join(".dotnet\\tools\\pwsh.exe");
-        pwsh_exe.is_file().then_some(pwsh_exe)
-    }
-
-    fn find_windows_powershell() -> Option<PathBuf> {
-        let system_root = PathBuf::from(std::env::var_os("SystemRoot")?);
-        let powershell = system_root.join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
-        powershell.is_file().then_some(powershell)
-    }
-
-    static POWERSHELL: std::sync::LazyLock<Option<String>> = std::sync::LazyLock::new(|| {
+    static SYSTEM_SHELL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let locations = [
             || find_pwsh_in_programfiles(false, false),
             || find_pwsh_in_programfiles(true, false),
@@ -120,10 +127,8 @@ pub fn get_powershell() -> Option<String> {
             || find_pwsh_in_msix(true),
             || find_pwsh_in_programfiles(true, true),
             || find_pwsh_in_scoop(),
-            || find_pwsh_in_dotnet_tools(),
             || which::which_global("pwsh.exe").ok(),
             || which::which_global("powershell.exe").ok(),
-            || find_windows_powershell(),
         ];
 
         locations
@@ -131,22 +136,13 @@ pub fn get_powershell() -> Option<String> {
             .find_map(|f| f())
             .map(|p| p.to_string_lossy().trim().to_owned())
             .inspect(|shell| log::info!("Found powershell in: {}", shell))
+            .unwrap_or_else(|| {
+                log::warn!("Powershell not found, falling back to `cmd`");
+                "cmd.exe".to_string()
+            })
     });
 
-    (*POWERSHELL).clone()
-}
-
-#[cfg(target_os = "windows")]
-pub fn get_windows_system_shell() -> String {
-    static CMD: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        log::warn!("Powershell not found, falling back to `cmd`");
-        let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-        std::path::PathBuf::from(system_root)
-            .join("System32\\cmd.exe")
-            .to_string_lossy()
-            .into_owned()
-    });
-    get_powershell().unwrap_or_else(|| (*CMD).clone())
+    (*SYSTEM_SHELL).clone()
 }
 
 pub fn post_inc<T: From<u8> + AddAssign<T> + Copy>(value: &mut T) -> T {

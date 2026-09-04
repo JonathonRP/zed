@@ -16,8 +16,7 @@
     "committer_tz": "-0700",
     "summary": "Add option to either use system clipboard or vim clipboard (#7936)",
     "previous": "c6826a61a0a947acf09d65ada568c9c4e4494cb2 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "5c4f3c0ceaa0b2270c8f4fc8ee32b85c70810206",
@@ -36,8 +35,7 @@
     "committer_tz": "-0700",
     "summary": "Add option to either use system clipboard or vim clipboard (#7936)",
     "previous": "c6826a61a0a947acf09d65ada568c9c4e4494cb2 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "5c4f3c0ceaa0b2270c8f4fc8ee32b85c70810206",
@@ -56,8 +54,7 @@
     "committer_tz": "-0700",
     "summary": "Add option to either use system clipboard or vim clipboard (#7936)",
     "previous": "c6826a61a0a947acf09d65ada568c9c4e4494cb2 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "5c4f3c0ceaa0b2270c8f4fc8ee32b85c70810206",
@@ -76,8 +73,7 @@
     "committer_tz": "-0700",
     "summary": "Add option to either use system clipboard or vim clipboard (#7936)",
     "previous": "c6826a61a0a947acf09d65ada568c9c4e4494cb2 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "5c4f3c0ceaa0b2270c8f4fc8ee32b85c70810206",
@@ -96,8 +92,7 @@
     "committer_tz": "-0700",
     "summary": "Add option to either use system clipboard or vim clipboard (#7936)",
     "previous": "c6826a61a0a947acf09d65ada568c9c4e4494cb2 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "5c4f3c0ceaa0b2270c8f4fc8ee32b85c70810206",
@@ -116,8 +111,7 @@
     "committer_tz": "-0700",
     "summary": "Add option to either use system clipboard or vim clipboard (#7936)",
     "previous": "c6826a61a0a947acf09d65ada568c9c4e4494cb2 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "5c4f3c0ceaa0b2270c8f4fc8ee32b85c70810206",
@@ -136,8 +130,7 @@
     "committer_tz": "-0700",
     "summary": "Add option to either use system clipboard or vim clipboard (#7936)",
     "previous": "c6826a61a0a947acf09d65ada568c9c4e4494cb2 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -156,8 +149,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -176,8 +168,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -196,8 +187,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -216,8 +206,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -236,8 +225,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -256,8 +244,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -276,8 +263,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -296,8 +282,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -316,8 +301,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -336,8 +320,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "3635d2dcedd83f1b6702f33ca2673317f7fa4695",
@@ -356,8 +339,7 @@
     "committer_tz": "-0700",
     "summary": "Highlight selections on vim yank (#7638)",
     "previous": "efe23ebfcdd653b13be79132b1e2925bcd7bde45 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "b65cf6d2d9576171edb407f5bbaa231c33af1f71",
@@ -376,8 +358,7 @@
     "committer_tz": "-0800",
     "summary": "Merge branch 'main' into language-api-docs",
     "previous": "6457ccf9ece3b36a37e675783abee9748a443115 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "b65cf6d2d9576171edb407f5bbaa231c33af1f71",
@@ -396,8 +377,7 @@
     "committer_tz": "-0800",
     "summary": "Merge branch 'main' into language-api-docs",
     "previous": "6457ccf9ece3b36a37e675783abee9748a443115 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "b02bd9bce1db3a68dcd606718fa02709020860af",
@@ -416,8 +396,7 @@
     "committer_tz": "-0600",
     "summary": "Fix Y on last line with no trailing new line",
     "previous": "7c77baa7c17eea106330622e70513ea9389d50a1 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "b02bd9bce1db3a68dcd606718fa02709020860af",
@@ -436,8 +415,7 @@
     "committer_tz": "-0600",
     "summary": "Fix Y on last line with no trailing new line",
     "previous": "7c77baa7c17eea106330622e70513ea9389d50a1 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "e4794e3134b6449e36ed2771a8849046489cc252",
@@ -456,8 +434,7 @@
     "committer_tz": "-0600",
     "summary": "vim: Fix linewise copy of last line with no trailing newline",
     "previous": "26c3312049a9c73bc3350528c1defd3820a7a8c7 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "e4794e3134b6449e36ed2771a8849046489cc252",
@@ -476,8 +453,7 @@
     "committer_tz": "-0600",
     "summary": "vim: Fix linewise copy of last line with no trailing newline",
     "previous": "26c3312049a9c73bc3350528c1defd3820a7a8c7 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "e4794e3134b6449e36ed2771a8849046489cc252",
@@ -496,8 +472,7 @@
     "committer_tz": "-0600",
     "summary": "vim: Fix linewise copy of last line with no trailing newline",
     "previous": "26c3312049a9c73bc3350528c1defd3820a7a8c7 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "e4794e3134b6449e36ed2771a8849046489cc252",
@@ -516,8 +491,7 @@
     "committer_tz": "-0600",
     "summary": "vim: Fix linewise copy of last line with no trailing newline",
     "previous": "26c3312049a9c73bc3350528c1defd3820a7a8c7 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "e4794e3134b6449e36ed2771a8849046489cc252",
@@ -536,8 +510,7 @@
     "committer_tz": "-0600",
     "summary": "vim: Fix linewise copy of last line with no trailing newline",
     "previous": "26c3312049a9c73bc3350528c1defd3820a7a8c7 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "33d7fe02ee560f6ed57d1425c43e60aef3b66e64",
@@ -556,8 +529,7 @@
     "committer_tz": "-0600",
     "summary": "Rewrite paste",
     "previous": "31db5e4f62e8fca75aa0870f903ae044524c3580 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "33d7fe02ee560f6ed57d1425c43e60aef3b66e64",
@@ -576,8 +548,7 @@
     "committer_tz": "-0600",
     "summary": "Rewrite paste",
     "previous": "31db5e4f62e8fca75aa0870f903ae044524c3580 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "868c46062008bb0bcab2d41a38b4295996b9b958",
@@ -596,8 +567,7 @@
     "committer_tz": "-0700",
     "summary": ":art: Rename and simplify some autoindent stuff",
     "previous": "7a26fa18c7fee3fe031b991e18b55fd8f9c4eb1b crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "e93c49f4f02b3edaddae6a6a4cc0ac433f242357",
@@ -616,8 +586,7 @@
     "committer_tz": "-0700",
     "summary": "Unify visual line_mode and non line_mode operators",
     "previous": "11569a869a72f786a9798c53266e28c05c79f824 crates/vim/src/utils.rs",
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -636,8 +605,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -656,8 +624,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -676,8 +643,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -696,8 +662,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -716,8 +681,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -736,8 +700,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -756,8 +719,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -776,8 +738,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -796,8 +757,7 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   },
   {
     "sha": "082036161fd3815c831ceedfd28ba15b0ed6eb9f",
@@ -816,7 +776,6 @@
     "committer_tz": "-0700",
     "summary": "Enable copy and paste in vim mode",
     "previous": null,
-    "filename": "crates/vim/src/utils.rs",
-    "boundary": false
+    "filename": "crates/vim/src/utils.rs"
   }
 ]

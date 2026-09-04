@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Context as _, Result};
 use buffer_diff::DiffHunkStatus;
 use editor::{
-    DiffHunkRenderer, Editor, EditorEvent, SplittableEditor,
+    DiffHunkDelegate, Editor, EditorEvent, ResolvedDiffHunks, SplittableEditor,
     actions::{GoToHunk, GoToPreviousHunk},
 };
 use git::{Commit, UnstageAll, UnstageAndNext};
@@ -26,6 +26,7 @@ use std::{
     sync::Arc,
 };
 use ui::{DiffStat, Divider, Icon, Tooltip, Window, prelude::*};
+use util::ResultExt as _;
 use workspace::{
     ItemNavHistory, SerializableItem, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
     Workspace,
@@ -33,9 +34,50 @@ use workspace::{
     searchable::SearchableItemHandle,
 };
 
-pub(crate) struct StagedDiffHunkRenderer;
+pub(crate) struct StagedDiffDelegate;
 
-impl DiffHunkRenderer for StagedDiffHunkRenderer {
+impl DiffHunkDelegate for StagedDiffDelegate {
+    fn toggle(
+        &self,
+        hunks: Vec<ResolvedDiffHunks>,
+        editor: &mut Editor,
+        window: &mut Window,
+        cx: &mut Context<Editor>,
+    ) {
+        self.stage_or_unstage(false, hunks, editor, window, cx);
+    }
+
+    fn stage_or_unstage(
+        &self,
+        stage: bool,
+        hunks: Vec<ResolvedDiffHunks>,
+        editor: &mut Editor,
+        _window: &mut Window,
+        cx: &mut Context<Editor>,
+    ) {
+        if stage {
+            return;
+        }
+        let Some(project) = editor.project().cloned() else {
+            return;
+        };
+        for hunks in hunks {
+            let index_ranges = hunks
+                .hunks
+                .into_iter()
+                .map(|hunk| hunk.buffer_range)
+                .collect::<Vec<_>>();
+            if index_ranges.is_empty() {
+                continue;
+            }
+            project
+                .update(cx, |project, cx| {
+                    project.unstage_staged_hunks(hunks.diff, index_ranges, cx)
+                })
+                .log_err();
+        }
+    }
+
     fn render_hunk_controls(
         &self,
         row: u32,
@@ -186,7 +228,7 @@ impl StagedDiff {
                 Capability::ReadOnly,
                 "No staged changes",
                 move |editor, cx| {
-                    editor.set_diff_hunk_renderer(Some(Arc::new(StagedDiffHunkRenderer)), cx);
+                    editor.set_diff_hunk_delegate(Some(Arc::new(StagedDiffDelegate)), cx);
                     editor.rhs_editor().update(cx, |rhs_editor, _cx| {
                         rhs_editor.set_read_only(true);
                         rhs_editor.register_addon(GitPanelAddon {
@@ -472,6 +514,7 @@ impl SerializableItem for StagedDiff {
         _: &mut Workspace,
         _: workspace::ItemId,
         _: bool,
+        _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Task<Result<()>>> {
         Some(Task::ready(Ok(())))

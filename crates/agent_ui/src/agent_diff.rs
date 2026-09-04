@@ -6,8 +6,8 @@ use anyhow::Result;
 use buffer_diff::DiffHunkStatus;
 use collections::{HashMap, HashSet};
 use editor::{
-    DiffHunkRenderer, Direction, Editor, EditorEvent, EditorSettings, MultiBuffer,
-    MultiBufferSnapshot, SelectionEffects, SplittableEditor, ToPoint,
+    DiffHunkDelegate, Direction, Editor, EditorEvent, EditorSettings, MultiBuffer,
+    MultiBufferSnapshot, ResolvedDiffHunks, SelectionEffects, SplittableEditor, ToPoint,
     actions::{GoToHunk, GoToPreviousHunk},
     multibuffer_context_lines,
     scroll::Autoscroll,
@@ -101,7 +101,7 @@ impl AgentDiffPane {
                 cx,
             );
             diff_display_editor
-                .set_diff_hunk_renderer(Some(agent_diff_renderer(&thread, workspace.clone())), cx);
+                .set_diff_hunk_delegate(Some(agent_diff_delegate(&thread, workspace.clone())), cx);
             diff_display_editor.update_editors(cx, |editor, _cx| {
                 editor.register_addon(AgentDiffAddon);
             });
@@ -734,22 +734,41 @@ impl Render for AgentDiffPane {
     }
 }
 
-struct AgentDiffHunkRenderer {
+struct AgentDiffDelegate {
     thread: Entity<AcpThread>,
     workspace: WeakEntity<Workspace>,
 }
 
-fn agent_diff_renderer(
+fn agent_diff_delegate(
     thread: &Entity<AcpThread>,
     workspace: WeakEntity<Workspace>,
-) -> Arc<dyn DiffHunkRenderer> {
-    Arc::new(AgentDiffHunkRenderer {
+) -> Arc<dyn DiffHunkDelegate> {
+    Arc::new(AgentDiffDelegate {
         thread: thread.clone(),
         workspace,
     })
 }
 
-impl DiffHunkRenderer for AgentDiffHunkRenderer {
+impl DiffHunkDelegate for AgentDiffDelegate {
+    fn toggle(
+        &self,
+        _hunks: Vec<ResolvedDiffHunks>,
+        _editor: &mut Editor,
+        _window: &mut Window,
+        _cx: &mut Context<Editor>,
+    ) {
+    }
+
+    fn stage_or_unstage(
+        &self,
+        _stage: bool,
+        _hunks: Vec<ResolvedDiffHunks>,
+        _editor: &mut Editor,
+        _window: &mut Window,
+        _cx: &mut Context<Editor>,
+    ) {
+    }
+
     fn render_hunk_controls(
         &self,
         row: u32,
@@ -1560,7 +1579,7 @@ impl AgentDiff {
             for (editor, _) in self.reviewing_editors.drain() {
                 editor
                     .update(cx, |editor, cx| {
-                        editor.set_diff_hunk_renderer(None, cx);
+                        editor.set_diff_hunk_delegate(None, cx);
                         editor.unregister_addon::<EditorAgentDiffAddon>();
                     })
                     .ok();
@@ -1609,8 +1628,8 @@ impl AgentDiff {
 
                 if previous_state.is_none() {
                     editor.update(cx, |editor, cx| {
-                        editor.set_diff_hunk_renderer(
-                            Some(agent_diff_renderer(&thread, workspace.clone())),
+                        editor.set_diff_hunk_delegate(
+                            Some(agent_diff_delegate(&thread, workspace.clone())),
                             cx,
                         );
                         editor.set_expand_all_diff_hunks(cx);
@@ -1659,7 +1678,7 @@ impl AgentDiff {
             if in_workspace {
                 editor
                     .update(cx, |editor, cx| {
-                        editor.set_diff_hunk_renderer(None, cx);
+                        editor.set_diff_hunk_delegate(None, cx);
                         editor.unregister_addon::<EditorAgentDiffAddon>();
                     })
                     .ok();

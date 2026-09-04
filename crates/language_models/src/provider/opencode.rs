@@ -29,10 +29,9 @@ use util::ResultExt;
 use crate::provider::anthropic::{AnthropicEventMapper, into_anthropic};
 use crate::provider::google::{GoogleEventMapper, into_google};
 use crate::provider::open_ai::{
-    ChatCompletionMaxTokensParameter, OpenAiResponseEventMapper, into_open_ai,
+    ChatCompletionMaxTokensParameter, OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai,
     into_open_ai_response,
 };
-use language_model::chat_completion::{ChatCompletionEventMapper, ResponseStreamEvent};
 
 fn normalize_reasoning_effort(effort: &str) -> Option<ReasoningEffort> {
     match effort.trim().to_ascii_lowercase().as_str() {
@@ -424,8 +423,10 @@ impl OpenCodeLanguageModel {
         http_client: Arc<dyn HttpClient>,
         extra_headers: CustomHeaders,
         cx: &AsyncApp,
-    ) -> BoxFuture<'static, Result<futures::stream::BoxStream<'static, Result<ResponseStreamEvent>>>>
-    {
+    ) -> BoxFuture<
+        'static,
+        Result<futures::stream::BoxStream<'static, Result<open_ai::ResponseStreamEvent>>>,
+    > {
         // OpenAI crate appends /chat/completions to api_url, so we pass base + "/v1"
         let base_url = self.base_api_url(cx);
         let api_url: SharedString = format!("{base_url}/v1").into();
@@ -669,13 +670,9 @@ impl LanguageModel for OpenCodeLanguageModel {
                 };
                 let stream =
                     self.stream_anthropic(anthropic_request, http_client, extra_headers, cx);
-                let executor = cx.background_executor().clone();
                 async move {
                     let mapper = AnthropicEventMapper::new(PROVIDER_NAME, PROVIDER_ID);
-                    Ok(language_model::stream_in_background(
-                        mapper.map_stream(stream.await?).boxed(),
-                        executor,
-                    ))
+                    Ok(mapper.map_stream(stream.await?).boxed())
                 }
                 .boxed()
             }
@@ -703,13 +700,9 @@ impl LanguageModel for OpenCodeLanguageModel {
                 };
                 let stream =
                     self.stream_openai_chat(openai_request, http_client, extra_headers, cx);
-                let executor = cx.background_executor().clone();
                 async move {
-                    let mapper = ChatCompletionEventMapper::new();
-                    Ok(language_model::stream_in_background(
-                        mapper.map_stream(stream.await?).boxed(),
-                        executor,
-                    ))
+                    let mapper = OpenAiEventMapper::new();
+                    Ok(mapper.map_stream(stream.await?).boxed())
                 }
                 .boxed()
             }
@@ -733,13 +726,9 @@ impl LanguageModel for OpenCodeLanguageModel {
                 };
                 let stream =
                     self.stream_openai_response(response_request, http_client, extra_headers, cx);
-                let executor = cx.background_executor().clone();
                 async move {
                     let mapper = OpenAiResponseEventMapper::new(PROVIDER_ID);
-                    Ok(language_model::stream_in_background(
-                        mapper.map_stream(stream.await?).boxed(),
-                        executor,
-                    ))
+                    Ok(mapper.map_stream(stream.await?).boxed())
                 }
                 .boxed()
             }

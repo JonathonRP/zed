@@ -644,6 +644,8 @@ mod tests {
     const RP_RELEASE: RpReleaseMetadata = RpReleaseMetadata {
         calendar_version: "20260902.1",
         release_tag: "rp-stable-20260902.1",
+        upstream_tag: "v1.17.2",
+        upstream_tag_commit: "0123456789abcdef0123456789abcdef01234567",
         release_notes: "# RP Fork Release Notes 20260902.1",
         notes_identity: "sha256:notes",
         manifest: "{}",

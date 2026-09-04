@@ -73,8 +73,7 @@ mod test_context;
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 mod visual_test_context;
 
-/// The duration for which native applications wait for futures returned from
-/// [Context::on_app_quit] before fully quitting.
+/// The duration for which futures returned from [Context::on_app_quit] can run before the application fully quits.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Temporary(?) wrapper around [`RefCell<App>`] to help us debug any double borrows.
@@ -970,11 +969,8 @@ impl App {
         self.entities.assert_no_new_leaks(snapshot)
     }
 
-    /// Quit the application gracefully.
-    ///
-    /// Native applications give handlers registered with [`Context::on_app_quit`]
-    /// [`SHUTDOWN_TIMEOUT`] to complete. WebAssembly runs them asynchronously as best-effort cleanup
-    /// because its event-loop thread cannot block.
+    /// Quit the application gracefully. Handlers registered with [`Context::on_app_quit`]
+    /// will be given `SHUTDOWN_TIMEOUT` to complete before exiting.
     pub fn shutdown(&mut self) {
         let mut futures = Vec::new();
 
@@ -988,7 +984,6 @@ impl App {
         self.quitting = true;
 
         let futures = futures::future::join_all(futures);
-        #[cfg(not(target_family = "wasm"))]
         if self
             .foreground_executor
             .block_with_timeout(SHUTDOWN_TIMEOUT, futures)
@@ -996,8 +991,6 @@ impl App {
         {
             log::error!("timed out waiting on app_will_quit");
         }
-        #[cfg(target_family = "wasm")]
-        self.foreground_executor.spawn(futures).detach();
 
         self.quitting = false;
     }
@@ -1771,9 +1764,9 @@ impl App {
                 if focus.ref_count.load(SeqCst) == 0 {
                     for window_handle in self.windows() {
                         window_handle
-                            .update(self, |_, window, cx| {
+                            .update(self, |_, window, _| {
                                 if window.focus == Some(handle_id) {
-                                    window.blur(cx);
+                                    window.blur();
                                 }
                             })
                             .unwrap();
@@ -2397,7 +2390,10 @@ impl App {
         for window in self.windows() {
             window
                 .update(self, |_, window, cx| {
-                    window.clear_pending_keystrokes(cx);
+                    if window.pending_input_keystrokes().is_some() {
+                        window.clear_pending_keystrokes();
+                        window.pending_input_changed(cx);
+                    }
                 })
                 .ok();
         }

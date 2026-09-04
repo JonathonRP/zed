@@ -1,5 +1,4 @@
 use anyhow::Result;
-use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 
 use super::{AccentStackEntry, NodeTracker};
@@ -106,7 +105,7 @@ impl MindmapAccents {
             Some(attr) => attr,
             None => return Ok(None),
         };
-        let class = class_attr.normalized_value(XmlVersion::Implicit1_0)?;
+        let class = class_attr.unescape_value()?;
         let is_root = class.split_whitespace().any(|t| t == "section-root");
 
         for token in class.split_whitespace() {

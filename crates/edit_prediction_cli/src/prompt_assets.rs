@@ -26,12 +26,11 @@ pub fn get_prompt(name: &'static str) -> Cow<'static, str> {
 
 #[cfg(not(feature = "dynamic_prompts"))]
 pub fn get_prompt(name: &'static str) -> Cow<'static, str> {
-    // Dev builds read prompts from the checkout at runtime (no baked path).
-    util::fs_embed! {
-        struct EmbeddedPrompts,
-        crate_relative = "src/prompts",
-        root_relative = "crates/edit_prediction_cli/src/prompts",
-    }
+    use rust_embed::RustEmbed;
+
+    #[derive(RustEmbed)]
+    #[folder = "src/prompts"]
+    struct EmbeddedPrompts;
 
     match EmbeddedPrompts::get(name) {
         Some(file) => match file.data {
