@@ -6,7 +6,7 @@ on:
     - cron: "0 0 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: rp-upstream-main-sync
@@ -21,14 +21,12 @@ jobs:
     steps:
       - name: Fetch exact fork and upstream tips
         id: tips
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "JonathonRP/zed"
           git init --bare "$RUNNER_TEMP/sync.git"
           cd "$RUNNER_TEMP/sync.git"
-          fork_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          fork_url="https://github.com/${GITHUB_REPOSITORY}.git"
           upstream_url="https://github.com/zed-industries/zed.git"
           git remote add fork "$fork_url"
           git remote add upstream "$upstream_url"
@@ -65,6 +63,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           OLD_SHA: ${{ steps.tips.outputs.old_sha }}
           NEW_SHA: ${{ steps.tips.outputs.new_sha }}
+          RP_MAIN_SYNC_DEPLOY_KEY: ${{ secrets.RP_MAIN_SYNC_DEPLOY_KEY }}
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/sync.git"
@@ -76,16 +75,16 @@ jobs:
               > "$RUNNER_TEMP/block-reason.txt"
             exit 1
           fi
-          response="$(
-            gh api --method POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
-              -f branch=main
-          )"
-          merge_type="$(jq -r .merge_type <<<"$response")"
-          if [[ "$merge_type" != "fast-forward" && "$merge_type" != "none" ]]; then
-            echo "GitHub reported unexpected fork sync type $merge_type." \
-              > "$RUNNER_TEMP/block-reason.txt"
-            exit 1
-          fi
+          test -n "$RP_MAIN_SYNC_DEPLOY_KEY"
+          key_file="$RUNNER_TEMP/rp-main-sync-key"
+          known_hosts="$RUNNER_TEMP/github-known-hosts"
+          trap 'rm -f "$key_file" "$known_hosts"' EXIT
+          printf '%s\n' "$RP_MAIN_SYNC_DEPLOY_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$known_hosts"
+          git remote set-url fork "git@github.com:${GITHUB_REPOSITORY}.git"
+          GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
+            git push fork "${NEW_SHA}:refs/heads/main"
           updated_sha="$(
             git ls-remote --exit-code fork refs/heads/main | cut -f1
           )"
