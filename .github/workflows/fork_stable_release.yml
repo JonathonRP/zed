@@ -52,18 +52,43 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          matching_sha="$(
+          set -euo pipefail
+          pr="$(
             gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
-              --jq '.[] | select(.merged_at != null and .base.ref == "release/rp-stable") | .merge_commit_sha'
+              --jq '[.[] | select(
+                .merged_at != null and
+                .base.ref == "release/rp-stable" and
+                .merge_commit_sha == env.GITHUB_SHA
+              )] | if length == 1 then .[0] else empty end'
           )"
-          test "$matching_sha" = "$GITHUB_SHA"
+          test -n "$pr"
+          pr_number="$(jq -r .number <<<"$pr")"
+          pr_author="$(jq -r .user.login <<<"$pr")"
+          head_sha="$(jq -r .head.sha <<<"$pr")"
+          approved="$(
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/reviews" |
+              jq -r --arg author "$pr_author" '
+                group_by(.user.login)
+                | map(sort_by(.submitted_at) | last)
+                | any(.state == "APPROVED" and .user.login != $author)
+              '
+          )"
+          test "$approved" = "true"
+          validation="$(
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${head_sha}/check-runs" \
+              --jq '[.check_runs[] | select(
+                .name == "Validate RP stable compatibility" and
+                .conclusion == "success"
+              )] | length'
+          )"
+          test "$validation" -ge 1
 
       - name: Verify pinned upstream stable base
         run: |
           tag="$(python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])')"
           git fetch --no-tags https://github.com/zed-industries/zed.git \
             "refs/tags/${tag}:refs/tags/${tag}"
-          python3 script/rp_stable_base.py verify
+          python3 script/rp_stable_base.py verify --previous-ref HEAD^1
 
       - name: Allocate calendar version and curate notes
         id: allocate
@@ -275,7 +300,7 @@ jobs:
           tag="$(python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])')"
           git fetch --no-tags https://github.com/zed-industries/zed.git \
             "refs/tags/${tag}:refs/tags/${tag}"
-          python3 script/rp_stable_base.py verify
+          python3 script/rp_stable_base.py verify --previous-ref HEAD^1
           cp target/rp-release-metadata/rp-release-manifest.json \
             target/linux-source-identity.json
 

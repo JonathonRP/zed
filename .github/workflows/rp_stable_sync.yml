@@ -3,7 +3,7 @@ name: RP upstream stable sync
 on:
   workflow_dispatch:
   schedule:
-    - cron: "23 12 * * 1"
+    - cron: "0 0 * * *"
   pull_request:
     branches:
       - release/rp-stable
@@ -65,6 +65,25 @@ jobs:
             --output "$RUNNER_TEMP/candidate-base.json" \
             --github-output "$GITHUB_OUTPUT"
 
+      - name: Write discovery audit
+        env:
+          UPDATE: ${{ steps.stable.outputs.update }}
+          OLD_TAG: ${{ steps.stable.outputs.old_tag }}
+          OLD_SHA: ${{ steps.stable.outputs.old_sha }}
+          OLD_VERSION: ${{ steps.stable.outputs.old_version }}
+          NEW_TAG: ${{ steps.stable.outputs.new_tag }}
+          NEW_SHA: ${{ steps.stable.outputs.new_sha }}
+          NEW_VERSION: ${{ steps.stable.outputs.new_version }}
+        run: |
+          {
+           echo "## Official stable discovery"
+           echo
+           echo "- Schedule: \`0 0 * * *\` (00:00 UTC daily)"
+           echo "- Current: \`${OLD_TAG:-unchanged}\` / \`${OLD_SHA:-unchanged}\` / \`${OLD_VERSION:-unchanged}\`"
+           echo "- Candidate: \`${NEW_TAG:-none}\` / \`${NEW_SHA:-none}\` / \`${NEW_VERSION:-none}\`"
+           echo "- Update proposed: \`${UPDATE}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Rebase RP patch series onto new stable
         if: steps.stable.outputs.update == 'true'
         env:
@@ -98,6 +117,11 @@ jobs:
           set -euo pipefail
           branch="automation/rp-stable-v${NEW_VERSION}"
           remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          release_tip="$(git rev-parse HEAD^1)"
+          live_release_tip="$(
+            git ls-remote "$remote" refs/heads/release/rp-stable | cut -f1
+          )"
+          test "$live_release_tip" = "$release_tip"
           expected="$(git ls-remote "$remote" "refs/heads/${branch}" | cut -f1)"
           git branch -f "$branch" HEAD
           git push "$remote" "$branch:$branch" \
@@ -157,8 +181,8 @@ jobs:
   validate:
     if: >-
       github.repository == 'JonathonRP/zed' &&
-      github.event_name == 'pull_request' &&
-      startsWith(github.head_ref, 'automation/rp-stable-v')
+      github.event_name == 'pull_request'
+    name: Validate RP stable compatibility
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout proposed stable sync
@@ -177,7 +201,7 @@ jobs:
           [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
           git fetch --no-tags https://github.com/zed-industries/zed.git \
             "refs/tags/${tag}:refs/tags/${tag}"
-          python3 script/rp_stable_base.py verify
+          python3 script/rp_stable_base.py verify --previous-ref HEAD^1
           python3 -m unittest discover -s script -p 'test_rp*.py'
           cargo test -p release_channel
           cargo test -p auto_update rp_

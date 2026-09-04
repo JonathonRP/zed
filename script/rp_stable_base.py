@@ -14,6 +14,7 @@ from typing import Any
 
 BASE_PATH = pathlib.Path(".github/rp-stable-base.json")
 UPSTREAM_REPOSITORY = "zed-industries/zed"
+SYNC_CRON_UTC = "0 0 * * *"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 STABLE_VERSION = re.compile(
     r"^(?P<major>0|[1-9][0-9]*)\."
@@ -48,30 +49,61 @@ def parse_version(value: str) -> tuple[int, int, int]:
     return tuple(int(match[group]) for group in ("major", "minor", "patch"))
 
 
-def read_base(path: pathlib.Path) -> dict[str, Any]:
-    base = json.loads(path.read_text(encoding="utf-8"))
+def validate_base(base: Any, source: str) -> dict[str, Any]:
     expected_keys = {
         "schema_version",
+        "automation",
+        "initial_source_correction",
         "upstream_repository",
         "upstream_tag",
         "upstream_tag_commit",
         "upstream_version",
     }
     if not isinstance(base, dict) or set(base) != expected_keys:
-        raise StableBaseError(f"{path} must contain exactly {sorted(expected_keys)}")
-    if base["schema_version"] != 1:
-        raise StableBaseError(f"{path} has an unsupported schema version")
+        raise StableBaseError(f"{source} must contain exactly {sorted(expected_keys)}")
+    if base["schema_version"] != 2:
+        raise StableBaseError(f"{source} has an unsupported schema version")
+    expected_automation = {
+        "fork_main_sync_cron_utc": SYNC_CRON_UTC,
+        "stable_sync_cron_utc": SYNC_CRON_UTC,
+    }
+    if base["automation"] != expected_automation:
+        raise StableBaseError(
+            f"{source} must schedule both upstream syncs at midnight UTC"
+        )
+    correction = base["initial_source_correction"]
+    correction_keys = {
+        "previous_rp_tip",
+        "previous_upstream_commit",
+        "previous_upstream_version",
+    }
+    if not isinstance(correction, dict) or set(correction) != correction_keys:
+        raise StableBaseError(
+            f"{source} must contain the initial source-correction identity"
+        )
+    for key in ("previous_rp_tip", "previous_upstream_commit"):
+        if not isinstance(correction[key], str) or not FULL_SHA.fullmatch(
+            correction[key]
+        ):
+            raise StableBaseError(f"{source} has an invalid {key}")
+    parse_version(correction["previous_upstream_version"])
     if base["upstream_repository"] != UPSTREAM_REPOSITORY:
-        raise StableBaseError(f"{path} must pin {UPSTREAM_REPOSITORY}")
+        raise StableBaseError(f"{source} must pin {UPSTREAM_REPOSITORY}")
     version = base["upstream_version"]
     parse_version(version)
     if base["upstream_tag"] != f"v{version}":
-        raise StableBaseError(f"{path} tag does not match its semantic version")
+        raise StableBaseError(f"{source} tag does not match its semantic version")
     if not isinstance(base["upstream_tag_commit"], str) or not FULL_SHA.fullmatch(
         base["upstream_tag_commit"]
     ):
-        raise StableBaseError(f"{path} must contain a lowercase full tag commit SHA")
+        raise StableBaseError(
+            f"{source} must contain a lowercase full tag commit SHA"
+        )
     return base
+
+
+def read_base(path: pathlib.Path) -> dict[str, Any]:
+    return validate_base(json.loads(path.read_text(encoding="utf-8")), str(path))
 
 
 def cargo_version_at(repo: pathlib.Path, revision: str) -> str:
@@ -130,6 +162,58 @@ def verify_base(
     return base
 
 
+def verify_transition(
+    repo: pathlib.Path, current: dict[str, Any], previous_ref: str
+) -> None:
+    previous_sha = run_git(repo, "rev-parse", "--verify", f"{previous_ref}^{{commit}}")
+    previous_json = run_git(
+        repo,
+        "show",
+        f"{previous_ref}:{BASE_PATH.as_posix()}",
+        check=False,
+    )
+    if previous_json:
+        previous = validate_base(
+            json.loads(previous_json), f"{previous_ref}:{BASE_PATH.as_posix()}"
+        )
+        if parse_version(current["upstream_version"]) < parse_version(
+            previous["upstream_version"]
+        ):
+            raise StableBaseError(
+                "pinned upstream stable version regresses from "
+                f"{previous['upstream_version']} to {current['upstream_version']}"
+            )
+        return
+
+    correction = current["initial_source_correction"]
+    if previous_sha != correction["previous_rp_tip"]:
+        raise StableBaseError(
+            "previous release has no stable-base metadata and does not match the "
+            "audited initial source-correction tip"
+        )
+    previous_version = cargo_version_at(repo, previous_ref)
+    if previous_version != correction["previous_upstream_version"]:
+        raise StableBaseError(
+            f"previous RP tip contains Zed {previous_version}, not audited "
+            f"{correction['previous_upstream_version']}"
+        )
+    ancestry = subprocess.run(
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            correction["previous_upstream_commit"],
+            previous_ref,
+        ],
+        cwd=repo,
+        check=False,
+    )
+    if ancestry.returncode != 0:
+        raise StableBaseError(
+            "previous RP tip is not based on its audited unreleased-main commit"
+        )
+
+
 def candidate_base(
     repo: pathlib.Path,
     current: dict[str, Any],
@@ -152,7 +236,9 @@ def candidate_base(
     if cargo_version_at(repo, tag_commit) != version:
         raise StableBaseError(f"{tag} does not contain Zed version {version}")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
+        "automation": current["automation"],
+        "initial_source_correction": current["initial_source_correction"],
         "upstream_repository": UPSTREAM_REPOSITORY,
         "upstream_tag": tag,
         "upstream_tag_commit": tag_commit,
@@ -174,6 +260,7 @@ def main() -> int:
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--app-version")
+    verify.add_argument("--previous-ref")
 
     candidate = subparsers.add_parser("candidate")
     candidate.add_argument("--release-json", type=pathlib.Path, required=True)
@@ -187,13 +274,23 @@ def main() -> int:
         current = verify_base(repo, base_path)
         if args.command == "verify":
             verify_base(repo, base_path, args.app_version)
+            if args.previous_ref:
+                verify_transition(repo, current, args.previous_ref)
             print(json.dumps(current, sort_keys=True))
         else:
             release = json.loads(args.release_json.read_text(encoding="utf-8"))
             update = candidate_base(repo, current, release)
             if update is None:
                 if args.github_output:
-                    write_github_outputs(args.github_output, {"update": "false"})
+                    write_github_outputs(
+                        args.github_output,
+                        {
+                            "update": "false",
+                            "old_tag": current["upstream_tag"],
+                            "old_sha": current["upstream_tag_commit"],
+                            "old_version": current["upstream_version"],
+                        },
+                    )
                 print("already tracking the latest official stable release")
             else:
                 args.output.write_text(
