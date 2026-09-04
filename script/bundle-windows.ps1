@@ -120,10 +120,11 @@ if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
     Write-Host "RP Windows sccache wrapper: $requiredRustcWrapper"
     Write-Host "RP Windows sccache idle timeout: $env:SCCACHE_IDLE_TIMEOUT (disabled)"
     & $requiredRustcWrapper --version
-    # Connect (starting a server if needed), then replace it so persistent
-    # runners cannot reuse a daemon that was born with the default timeout.
-    & $requiredRustcWrapper --show-stats --stats-format json | Out-Null
-    & $requiredRustcWrapper --stop-server | Out-Null
+    # Replace a daemon left by a persistent runner so this job always starts
+    # one with the current backend credentials and disabled idle timeout.
+    if (Get-Process -Name "sccache" -ErrorAction SilentlyContinue) {
+        & $requiredRustcWrapper --stop-server | Out-Null
+    }
     & $requiredRustcWrapper --start-server
     & $requiredRustcWrapper --zero-stats
 
