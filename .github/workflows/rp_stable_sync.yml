@@ -2,6 +2,14 @@ name: RP upstream stable sync
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Propose a stable update or validate a generated sync branch
+        type: choice
+        options:
+          - propose
+          - validate
+        default: propose
   schedule:
     - cron: "0 0 * * *"
   pull_request:
@@ -23,9 +31,16 @@ jobs:
   propose:
     if: >-
       github.repository == 'JonathonRP/zed' &&
-      github.event_name != 'pull_request'
+      (
+        github.event_name == 'schedule' ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.operation == 'propose'
+        )
+      )
     runs-on: ubuntu-22.04
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     steps:
@@ -178,10 +193,28 @@ jobs:
               --body-file "$body"
           fi
 
+      - name: Dispatch read-only compatibility validation
+        if: steps.stable.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.push.outputs.branch }}
+        run: |
+          set -euo pipefail
+          gh workflow run rp_stable_sync.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$BRANCH" \
+            -f operation=validate
+
   validate:
     if: >-
       github.repository == 'JonathonRP/zed' &&
-      github.event_name == 'pull_request'
+      (
+        github.event_name == 'pull_request' ||
+        (
+          github.event_name == 'workflow_dispatch' &&
+          inputs.operation == 'validate'
+        )
+      )
     name: Validate RP stable compatibility
     runs-on: ubuntu-22.04
     steps:
