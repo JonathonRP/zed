@@ -1,5 +1,6 @@
 import json
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -130,6 +131,47 @@ class StableBaseTests(unittest.TestCase):
         self.assertIn(".cargo/bundle-config.toml", release_workflow)
         self.assertIn('RUSTC_BOOTSTRAP = "1"', config)
         self.assertIn('rustflags = ["-Z", "share-generics=y"]', config)
+
+    def test_release_workflow_separates_control_and_product_sources(self):
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        contents = (
+            repo / ".github/workflows/fork_stable_release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("release_sha:", contents)
+        self.assertIn("validated_pr_head_sha:", contents)
+        self.assertIn("default: false", contents)
+        self.assertIn("Checkout trusted release controls", contents)
+        self.assertIn("path: control", contents)
+        self.assertIn(
+            'python3 "$GITHUB_WORKSPACE/control/script/rp_release_authorization.py"',
+            contents,
+        )
+        self.assertIn('--control-sha "$GITHUB_SHA"', contents)
+        self.assertIn("--require-attestation", contents)
+        self.assertIn("cancel-in-progress: false", contents)
+        sections = {}
+        matches = list(re.finditer(r"(?m)^  ([a-z_]+):\n", contents))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else None
+            sections[match.group(1)] = contents[match.start() : end]
+        for job in (
+            "metadata",
+            "package_windows",
+            "package_linux_remote_server",
+            "assemble",
+            "publish",
+        ):
+            with self.subTest(job=job):
+                self.assertIn("authorize", sections[job])
+                self.assertIn("github.event_name == 'workflow_dispatch'", sections[job])
+                self.assertIn(
+                    "ref: ${{ needs.authorize.outputs.release_sha }}", sections[job]
+                )
+        self.assertIn("inputs.publish_release", sections["publish"])
+        self.assertNotIn("Require a reviewed merge into RP stable", contents)
+        self.assertNotIn("github.event_name == 'push' ||", contents)
+        self.assertNotIn("--target \"$GITHUB_SHA\"", contents)
 
 
 class RepositoryVerificationTests(unittest.TestCase):

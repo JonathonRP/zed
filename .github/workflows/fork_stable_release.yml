@@ -3,21 +3,28 @@ name: RP fork stable release
 on:
   workflow_dispatch:
     inputs:
+      release_sha:
+        description: Full RP stable merge SHA to rebuild
+        required: true
+        type: string
+      validated_pr_head_sha:
+        description: Full PR head SHA that passed compatibility validation
+        required: true
+        type: string
       publish_release:
         description: Publish the completed packages as a GitHub Release
         type: boolean
-        default: true
+        default: false
   push:
     branches:
       - release/rp-stable
 
 permissions:
   contents: read
-  pull-requests: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ inputs.release_sha || github.sha }}
+  cancel-in-progress: false
 
 env:
   CARGO_INCREMENTAL: 0
@@ -27,9 +34,71 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
+  authorize:
+    name: Authorize RP stable source
+    if: >-
+      github.repository == 'JonathonRP/zed' &&
+      github.ref == 'refs/heads/release/rp-stable'
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+    outputs:
+      control_sha: ${{ steps.authorize.outputs.control_sha }}
+      release_sha: ${{ steps.authorize.outputs.release_sha }}
+      head_sha: ${{ steps.authorize.outputs.head_sha }}
+      pull_number: ${{ steps.authorize.outputs.pull_number }}
+      ordinary_run_id: ${{ steps.authorize.outputs.ordinary_run_id }}
+      ordinary_job_id: ${{ steps.authorize.outputs.ordinary_job_id }}
+    steps:
+      - name: Checkout trusted release controls
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          filter: blob:none
+          fetch-depth: 0
+          fetch-tags: false
+          persist-credentials: false
+
+      - name: Verify release authorization
+        id: authorize
+        shell: bash
+        env:
+          DISPATCH_RELEASE_SHA: ${{ inputs.release_sha }}
+          DISPATCH_VALIDATED_HEAD_SHA: ${{ inputs.validated_pr_head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_sha="$GITHUB_SHA"
+          arguments=()
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            release_sha="$DISPATCH_RELEASE_SHA"
+            arguments+=(
+              --validated-head-sha "$DISPATCH_VALIDATED_HEAD_SHA"
+              --require-attestation
+            )
+          fi
+          python3 "$GITHUB_WORKSPACE/control/script/rp_release_authorization.py" \
+            --control-root "$GITHUB_WORKSPACE/control" \
+            --event-name "$GITHUB_EVENT_NAME" \
+            --repository "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF" \
+            --actor "$GITHUB_ACTOR" \
+            --triggering-actor "$GITHUB_TRIGGERING_ACTOR" \
+            --control-sha "$GITHUB_SHA" \
+            --release-sha "$release_sha" \
+            --github-output "$GITHUB_OUTPUT" \
+            --step-summary "$GITHUB_STEP_SUMMARY" \
+            "${arguments[@]}"
+
   metadata:
     name: Allocate RP release metadata
+    needs: authorize
     if: >-
+      github.event_name == 'workflow_dispatch' &&
       github.repository == 'JonathonRP/zed' &&
       github.ref == 'refs/heads/release/rp-stable'
     runs-on: ubuntu-22.04
@@ -38,9 +107,10 @@ jobs:
       tag: ${{ steps.allocate.outputs.tag }}
       reused: ${{ steps.allocate.outputs.reused }}
     steps:
-      - name: Checkout full release history
+      - name: Checkout authorized product history
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
+          ref: ${{ needs.authorize.outputs.release_sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -48,43 +118,11 @@ jobs:
       - name: Fetch all RP release tags
         run: git fetch --force --tags origin
 
-      - name: Require a reviewed merge into RP stable
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          pr="$(
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
-              --jq '[.[] | select(
-                .merged_at != null and
-                .base.ref == "release/rp-stable" and
-                .merge_commit_sha == env.GITHUB_SHA
-              )] | if length == 1 then .[0] else empty end'
-          )"
-          test -n "$pr"
-          pr_number="$(jq -r .number <<<"$pr")"
-          pr_author="$(jq -r .user.login <<<"$pr")"
-          head_sha="$(jq -r .head.sha <<<"$pr")"
-          approved="$(
-            gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/reviews" |
-              jq -r --arg author "$pr_author" '
-                group_by(.user.login)
-                | map(sort_by(.submitted_at) | last)
-                | any(.state == "APPROVED" and .user.login != $author)
-              '
-          )"
-          test "$approved" = "true"
-          validation="$(
-            gh api "repos/${GITHUB_REPOSITORY}/commits/${head_sha}/check-runs" \
-              --jq '[.check_runs[] | select(
-                .name == "Validate RP stable compatibility" and
-                .conclusion == "success"
-              )] | length'
-          )"
-          test "$validation" -ge 1
-
       - name: Verify pinned upstream stable base
+        env:
+          RP_RELEASE_SHA: ${{ needs.authorize.outputs.release_sha }}
         run: |
+          test "$(git rev-parse HEAD)" = "$RP_RELEASE_SHA"
           tag="$(python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])')"
           git fetch --no-tags https://github.com/zed-industries/zed.git \
             "refs/tags/${tag}:refs/tags/${tag}"
@@ -110,17 +148,20 @@ jobs:
 
   package_windows:
     name: Package unsigned Windows stable
-    needs: metadata
+    needs:
+      - authorize
+      - metadata
     if: >-
+      github.event_name == 'workflow_dispatch' &&
       github.repository == 'JonathonRP/zed' &&
       github.ref == 'refs/heads/release/rp-stable'
     runs-on: ${{ vars.ZED_WINDOWS_RUNNER || 'windows-2022' }}
     timeout-minutes: 360
     steps:
-      - name: Checkout
+      - name: Checkout authorized product source
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize.outputs.release_sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -165,11 +206,12 @@ jobs:
       - name: Build unsigned installer and portable bundle
         shell: pwsh
         env:
+          RP_RELEASE_SHA: ${{ needs.authorize.outputs.release_sha }}
           RP_VERSION: ${{ needs.metadata.outputs.version }}
           ZED_REQUIRE_SCCACHE: "1"
           ZED_CLIENT_CHECKSUM_SEED: fork-unsigned-stable
         run: |
-          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) {
+          if ((git rev-parse HEAD) -ne $env:RP_RELEASE_SHA) {
             throw "Windows checkout does not match release commit"
           }
           $stableTag = (
@@ -184,6 +226,9 @@ jobs:
 
           $metadataPath = "target/rp-release-metadata/rp-release-manifest.json"
           $metadata = Get-Content -Raw $metadataPath | ConvertFrom-Json
+          if ($metadata.commit -ne $env:RP_RELEASE_SHA) {
+            throw "RP metadata does not match the authorized release commit"
+          }
           if ($metadata.calendar_version -ne $env:RP_VERSION) {
             throw "RP metadata version does not match the workflow allocation"
           }
@@ -244,17 +289,20 @@ jobs:
 
   package_linux_remote_server:
     name: Package Linux musl remote server
-    needs: metadata
+    needs:
+      - authorize
+      - metadata
     if: >-
+      github.event_name == 'workflow_dispatch' &&
       github.repository == 'JonathonRP/zed' &&
       github.ref == 'refs/heads/release/rp-stable'
     runs-on: ${{ vars.ZED_LINUX_RUNNER || 'ubuntu-22.04' }}
     timeout-minutes: 180
     steps:
-      - name: Checkout
+      - name: Checkout authorized product source
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize.outputs.release_sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -292,15 +340,20 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           RELEASE_CHANNEL: stable
+          RP_RELEASE_SHA: ${{ needs.authorize.outputs.release_sha }}
           RP_VERSION: ${{ needs.metadata.outputs.version }}
           RUSTFLAGS: -C target-feature=+crt-static
           ZED_RELEASE_CHANNEL: stable
         run: |
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$RP_RELEASE_SHA"
           tag="$(python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])')"
           git fetch --no-tags https://github.com/zed-industries/zed.git \
             "refs/tags/${tag}:refs/tags/${tag}"
           python3 script/rp_stable_base.py verify --previous-ref HEAD^1
+          manifest_sha="$(
+            python3 -c 'import json; print(json.load(open("target/rp-release-metadata/rp-release-manifest.json"))["commit"])'
+          )"
+          test "$manifest_sha" = "$RP_RELEASE_SHA"
           cp target/rp-release-metadata/rp-release-manifest.json \
             target/linux-source-identity.json
 
@@ -335,16 +388,21 @@ jobs:
   assemble:
     name: Assemble release assets
     needs:
+      - authorize
       - metadata
       - package_windows
       - package_linux_remote_server
     if: >-
+      github.event_name == 'workflow_dispatch' &&
       github.repository == 'JonathonRP/zed' &&
       github.ref == 'refs/heads/release/rp-stable'
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout manifest tooling
+      - name: Checkout authorized manifest tooling
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ needs.authorize.outputs.release_sha }}
+          persist-credentials: false
 
       - name: Download packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -361,8 +419,10 @@ jobs:
 
       - name: Finalize release manifests
         env:
+          RP_RELEASE_SHA: ${{ needs.authorize.outputs.release_sha }}
           RP_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
+          test "$(git rev-parse HEAD)" = "$RP_RELEASE_SHA"
           cmp dist/windows-source-identity.json dist/linux-source-identity.json
           cmp dist/windows-source-identity.json metadata/rp-release-manifest.json
           rm dist/windows-source-identity.json dist/linux-source-identity.json
@@ -392,13 +452,14 @@ jobs:
   publish:
     name: Publish GitHub Release
     needs:
+      - authorize
       - metadata
       - assemble
     if: >-
+      github.event_name == 'workflow_dispatch' &&
       github.repository == 'JonathonRP/zed' &&
       github.ref == 'refs/heads/release/rp-stable' &&
-      (github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.publish_release))
+      inputs.publish_release
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -406,6 +467,7 @@ jobs:
       - name: Checkout release history
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
+          ref: ${{ needs.authorize.outputs.release_sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
@@ -425,6 +487,7 @@ jobs:
       - name: Create or verify immutable release
         env:
           GH_TOKEN: ${{ github.token }}
+          RP_RELEASE_SHA: ${{ needs.authorize.outputs.release_sha }}
           RP_TAG: ${{ needs.metadata.outputs.tag }}
           RP_VERSION: ${{ needs.metadata.outputs.version }}
           RP_REUSED: ${{ needs.metadata.outputs.reused }}
@@ -435,8 +498,8 @@ jobs:
           if gh release view "$RP_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             git fetch --force origin "refs/tags/${RP_TAG}:refs/tags/${RP_TAG}"
             tag_sha="$(git rev-list -n 1 "refs/tags/${RP_TAG}")"
-            if [[ "$tag_sha" != "$GITHUB_SHA" ]]; then
-              echo "::error::Published RP tag ${RP_TAG} points to ${tag_sha}, not ${GITHUB_SHA}"
+            if [[ "$tag_sha" != "$RP_RELEASE_SHA" ]]; then
+              echo "::error::Published RP tag ${RP_TAG} points to ${tag_sha}, not ${RP_RELEASE_SHA}"
               exit 1
             fi
             mkdir published-dist
@@ -448,6 +511,8 @@ jobs:
               --published-assets published-dist
             echo "Published RP release ${RP_TAG} is byte-identical; leaving it unchanged."
           elif [[ "$RP_REUSED" == "true" ]]; then
+            git fetch --force origin "refs/tags/${RP_TAG}:refs/tags/${RP_TAG}"
+            test "$(git rev-list -n 1 "refs/tags/${RP_TAG}")" = "$RP_RELEASE_SHA"
             gh release create "$RP_TAG" dist/* \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
@@ -456,7 +521,7 @@ jobs:
           else
             gh release create "$RP_TAG" dist/* \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
+              --target "$RP_RELEASE_SHA" \
               --title "$title" \
               --notes-file metadata/release-notes.md
           fi
