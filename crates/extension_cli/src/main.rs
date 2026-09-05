@@ -16,7 +16,6 @@ use extension::extension_builder::{CompileExtensionOptions, ExtensionBuilder};
 use extension::{ExtensionManifest, ExtensionSnippets};
 use http_client::Url;
 use language::LanguageConfig;
-use language::QueryFile;
 use reqwest_client::ReqwestClient;
 use settings_content::SemanticTokenRules;
 use snippet_provider::file_to_snippets;
@@ -24,28 +23,6 @@ use snippet_provider::format::VsSnippetsFile;
 use task::TaskTemplates;
 use tokio::process::Command;
 use tree_sitter::{Language, Query, WasmStore};
-
-struct TestingContext {
-    known_resources: BTreeSet<PathBuf>,
-}
-
-impl TestingContext {
-    fn new(manifest: &ExtensionManifest, extension_path: &Path) -> Self {
-        let known_resources = manifest
-            .snippets
-            .as_ref()
-            .map(ExtensionSnippets::paths)
-            .into_iter()
-            .flatten()
-            .map(|relative_path| extension_path.join(relative_path))
-            .collect();
-        Self { known_resources }
-    }
-
-    fn is_known_resource(&self, path: &Path) -> bool {
-        self.known_resources.contains(path)
-    }
-}
 
 #[derive(Parser, Debug)]
 #[command(name = "zed-extension")]
@@ -120,9 +97,8 @@ async fn main() -> Result<()> {
     let extension_provides = manifest.provides();
     validate_extension_features(&extension_provides)?;
 
-    let cx = TestingContext::new(&manifest, &extension_path);
     let grammars = test_grammars(&manifest, &extension_path, &mut wasm_store)?;
-    test_languages(&manifest, &extension_path, &grammars, &cx)?;
+    test_languages(&manifest, &extension_path, &grammars)?;
     test_themes(&manifest, &extension_path, fs.clone()).await?;
     test_snippets(&manifest, &extension_path, fs.clone()).await?;
     test_debug_adapter_schemas(&manifest, &extension_path, fs.clone()).await?;
@@ -538,7 +514,6 @@ fn test_languages(
     manifest: &ExtensionManifest,
     extension_path: &Path,
     grammars: &HashMap<String, Language>,
-    context: &TestingContext,
 ) -> Result<()> {
     for relative_language_dir in &manifest.languages {
         let language_dir = extension_path.join(relative_language_dir);
@@ -586,26 +561,19 @@ fn test_languages(
                                 )
                             })?;
                 }
-                _ => {
-                    if let Ok(_query) = file_name.parse::<QueryFile>() {
-                        let grammar = grammar.with_context(|| {
-                            format! {
-                                "language {} provides query {} but no grammar",
-                                config.name,
-                                file_path.display()
-                            }
-                        })?;
+                _ if file_name.ends_with(".scm") => {
+                    let grammar = grammar.with_context(|| {
+                        format! {
+                            "language {} provides query {} but no grammar",
+                            config.name,
+                            file_path.display()
+                        }
+                    })?;
 
-                        let query_source = fs::read_to_string(&file_path)?;
-                        let _query = Query::new(grammar, &query_source)?;
-                    } else if file_name.ends_with(".scm") {
-                        bail!("query {file_name} is not supported by Zed and should be removed")
-                    } else if !context.is_known_resource(&file_path) {
-                        bail!(
-                            "'{file_name}' is not a supported file in a language directory and should be removed"
-                        )
-                    }
+                    let query_source = fs::read_to_string(&file_path)?;
+                    let _query = Query::new(grammar, &query_source)?;
                 }
+                _ => {}
             }
         }
 

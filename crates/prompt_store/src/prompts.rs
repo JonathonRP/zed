@@ -410,7 +410,7 @@ impl PromptBuilder {
                 let start = entry.range.start;
                 ContentPromptDiagnosticContext {
                     line_number: (start.row + 1) as usize,
-                    error_message: entry.diagnostic.message.to_string(),
+                    error_message: entry.diagnostic.message.clone(),
                     code_content: buffer.text_for_range(entry.range).collect(),
                 }
             })
@@ -493,7 +493,7 @@ impl PromptBuilder {
                 let start = entry.range.start;
                 ContentPromptDiagnosticContext {
                     line_number: (start.row + 1) as usize,
-                    error_message: entry.diagnostic.message.to_string(),
+                    error_message: entry.diagnostic.message.clone(),
                     code_content: buffer.text_for_range(entry.range).collect(),
                 }
             })

@@ -2,6 +2,7 @@ use anyhow::Result;
 use collections::HashMap;
 use gpui::{App, AppContext as _, Context, Entity, Task, WeakEntity};
 
+use async_channel::bounded;
 use futures::{FutureExt, future::Shared};
 use itertools::Itertools as _;
 use language::LanguageName;
@@ -15,7 +16,7 @@ use std::{
 };
 use task::{Shell, ShellBuilder, ShellKind, SpawnInTerminal};
 use terminal::{
-    Terminal, TerminalBuilder, TerminalMode, insert_zed_terminal_env,
+    TaskState, TaskStatus, Terminal, TerminalBuilder, insert_zed_terminal_env,
     terminal_settings::TerminalSettings,
 };
 use util::{
@@ -92,9 +93,14 @@ impl Project {
         let settings = TerminalSettings::get(settings_location, cx).clone();
         let detect_venv = settings.detect_venv.as_option().is_some();
 
-        let terminal_mode = TerminalMode::task(spawn_task.clone());
+        let (completion_tx, completion_rx) = bounded(1);
 
         let local_path = if is_via_remote { None } else { path.clone() };
+        let task_state = Some(TaskState {
+            spawned_task: spawn_task.clone(),
+            status: TaskStatus::Running,
+            completion_rx,
+        });
         let remote_client = self.remote_client.clone();
         let shell = match &remote_client {
             Some(remote_client) => remote_client
@@ -239,7 +245,7 @@ impl Project {
                     };
                     anyhow::Ok(TerminalBuilder::new(
                         local_path.map(|path| path.to_path_buf()),
-                        terminal_mode,
+                        task_state,
                         shell,
                         env,
                         settings.cursor_shape,
@@ -249,6 +255,7 @@ impl Project {
                         Duration::from_millis(settings.path_hyperlink_timeout_ms),
                         is_via_remote,
                         cx.entity_id().as_u64(),
+                        Some(completion_tx),
                         cx,
                         activation_script,
                         path_style,
@@ -408,7 +415,7 @@ impl Project {
                     };
                     anyhow::Ok(TerminalBuilder::new(
                         local_path.map(|path| path.to_path_buf()),
-                        TerminalMode::interactive(),
+                        None,
                         shell,
                         env,
                         settings.cursor_shape,
@@ -418,6 +425,7 @@ impl Project {
                         Duration::from_millis(settings.path_hyperlink_timeout_ms),
                         is_via_remote,
                         cx.entity_id().as_u64(),
+                        None,
                         cx,
                         activation_script,
                         path_style,

@@ -95,10 +95,12 @@ class FinalizeUpdateManifestTests(unittest.TestCase):
                 (dist / name).write_bytes(bytes([index]) * index)
 
             metadata = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "channel": "rp-stable",
                 "calendar_version": "20260902.1",
                 "upstream_version": "1.19.0",
+                "upstream_tag": "v1.19.0",
+                "upstream_tag_commit": "c" * 40,
                 "commit": "a" * 40,
                 "tag": "rp-stable-20260902.1",
                 "trust": {"signed": False, "label": "unsigned"},
@@ -114,8 +116,10 @@ class FinalizeUpdateManifestTests(unittest.TestCase):
             )
 
             update_manifest = json.loads(output_path.read_text(encoding="utf-8"))
-            self.assertEqual(update_manifest["schema_version"], 1)
+            self.assertEqual(update_manifest["schema_version"], 2)
             self.assertEqual(update_manifest["channel"], "rp-stable")
+            self.assertEqual(update_manifest["upstream_tag"], "v1.19.0")
+            self.assertEqual(update_manifest["upstream_tag_commit"], "c" * 40)
             self.assertEqual(
                 update_manifest["assets"]["windows_x86_64_installer"],
                 {

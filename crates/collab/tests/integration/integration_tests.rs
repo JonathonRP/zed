@@ -19,8 +19,8 @@ use gpui::{
     UpdateGlobal, px, size,
 };
 use language::{
-    Diagnostic, DiagnosticEntry, DiagnosticMessage, DiagnosticSourceKind, FakeLspAdapter, Language,
-    LanguageConfig, LanguageMatcher, LineEnding, OffsetRangeExt, Point, Rope,
+    Diagnostic, DiagnosticEntry, DiagnosticSourceKind, FakeLspAdapter, Language, LanguageConfig,
+    LanguageMatcher, LineEnding, OffsetRangeExt, Point, Rope,
     language_settings::{Formatter, FormatterList},
     rust_lang, tree_sitter_rust, tree_sitter_typescript,
 };
@@ -4237,7 +4237,7 @@ async fn test_collaborating_with_diagnostics(
             diagnostics: vec![lsp::Diagnostic {
                 severity: Some(lsp::DiagnosticSeverity::WARNING),
                 range: lsp::Range::new(lsp::Position::new(0, 4), lsp::Position::new(0, 7)),
-                message: lsp::DiagnosticMessage::from("message 0"),
+                message: "message 0".to_string(),
                 ..Default::default()
             }],
         },
@@ -4257,7 +4257,7 @@ async fn test_collaborating_with_diagnostics(
             diagnostics: vec![lsp::Diagnostic {
                 severity: Some(lsp::DiagnosticSeverity::ERROR),
                 range: lsp::Range::new(lsp::Position::new(0, 4), lsp::Position::new(0, 7)),
-                message: lsp::DiagnosticMessage::from("message 1"),
+                message: "message 1".to_string(),
                 ..Default::default()
             }],
         },
@@ -4324,14 +4324,6 @@ async fn test_collaborating_with_diagnostics(
     );
 
     // Simulate a language server reporting more errors for a file.
-    let markdown_message = lsp::MarkupContent {
-        kind: lsp::MarkupKind::Markdown,
-        value: "\n**message 1**\n".to_string(),
-    };
-    let plain_text_message = lsp::MarkupContent {
-        kind: lsp::MarkupKind::PlainText,
-        value: "\nmessage 2\n".to_string(),
-    };
     fake_language_server.notify::<lsp::notification::PublishDiagnostics>(
         lsp::PublishDiagnosticsParams {
             uri: lsp::Uri::from_file_path(path!("/a/a.rs")).unwrap(),
@@ -4340,13 +4332,13 @@ async fn test_collaborating_with_diagnostics(
                 lsp::Diagnostic {
                     severity: Some(lsp::DiagnosticSeverity::ERROR),
                     range: lsp::Range::new(lsp::Position::new(0, 4), lsp::Position::new(0, 7)),
-                    message: lsp::DiagnosticMessage::from(markdown_message.clone()),
+                    message: "message 1".to_string(),
                     ..Default::default()
                 },
                 lsp::Diagnostic {
                     severity: Some(lsp::DiagnosticSeverity::WARNING),
                     range: lsp::Range::new(lsp::Position::new(0, 10), lsp::Position::new(0, 13)),
-                    message: lsp::DiagnosticMessage::from(plain_text_message.clone()),
+                    message: "message 2".to_string(),
                     ..Default::default()
                 },
             ],
@@ -4407,7 +4399,7 @@ async fn test_collaborating_with_diagnostics(
                     Point::new(0, 4)..Point::new(0, 7),
                     Diagnostic {
                         group_id: 2,
-                        message: DiagnosticMessage::from_lsp_markup(&markdown_message),
+                        message: "message 1".to_string(),
                         severity: lsp::DiagnosticSeverity::ERROR,
                         is_primary: true,
                         source_kind: DiagnosticSourceKind::Pushed,
@@ -4419,7 +4411,7 @@ async fn test_collaborating_with_diagnostics(
                     Diagnostic {
                         group_id: 3,
                         severity: lsp::DiagnosticSeverity::WARNING,
-                        message: DiagnosticMessage::from_lsp_markup(&plain_text_message),
+                        message: "message 2".to_string(),
                         is_primary: true,
                         source_kind: DiagnosticSourceKind::Pushed,
                         ..Diagnostic::default()
@@ -4549,7 +4541,7 @@ async fn test_collaborating_with_lsp_progress_updates_and_diagnostics_ordering(
                     severity: Some(lsp::DiagnosticSeverity::WARNING),
                     source: Some("the-disk-based-diagnostics-source".into()),
                     range: lsp::Range::new(lsp::Position::new(0, 0), lsp::Position::new(0, 0)),
-                    message: lsp::DiagnosticMessage::from("message one"),
+                    message: "message one".to_string(),
                     ..Default::default()
                 }],
             },

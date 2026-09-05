@@ -457,14 +457,9 @@ impl LanguageModel for AnthropicCompatibleLanguageModel {
         let completion_request = self.stream_completion(request, cx);
         let provider_name = self.provider_name.clone();
         let provider_id = self.provider_id.clone();
-        let executor = cx.background_executor().clone();
         let future = self.request_limiter.stream(async move {
             let response = completion_request.await?;
-            let events = AnthropicEventMapper::new(provider_name, provider_id).map_stream(response);
-            Ok(language_model::stream_in_background(
-                events.boxed(),
-                executor,
-            ))
+            Ok(AnthropicEventMapper::new(provider_name, provider_id).map_stream(response))
         });
         async move { Ok(future.await?.boxed()) }.boxed()
     }

@@ -1,8 +1,5 @@
 #![cfg_attr(target_family = "wasm", no_main)]
 
-#[path = "example_support/fonts.rs"]
-mod example_support;
-
 use gpui::{
     App, Bounds, Context, MousePressureEvent, PressureStage, Window, WindowBounds, WindowOptions,
     div, prelude::*, px, rgb, size,
@@ -51,9 +48,6 @@ impl MousePressureExample {
 
 fn run_example() {
     application().run(|cx: &mut App| {
-        if !example_support::load_fonts(cx) {
-            return;
-        }
         let bounds = Bounds::centered(None, size(px(500.), px(500.0)), cx);
 
         cx.open_window(

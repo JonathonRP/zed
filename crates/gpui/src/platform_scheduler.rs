@@ -66,42 +66,51 @@ impl PlatformScheduler {
 }
 
 impl Scheduler for PlatformScheduler {
-    #[cfg(not(target_family = "wasm"))]
     fn block(
         &self,
         _session_id: Option<SessionId>,
-        mut future: Pin<&mut dyn Future<Output = ()>>,
-        timeout: Option<Duration>,
+        #[cfg_attr(target_family = "wasm", allow(unused_mut))] mut future: Pin<
+            &mut dyn Future<Output = ()>,
+        >,
+        #[cfg_attr(target_family = "wasm", allow(unused_variables))] timeout: Option<Duration>,
     ) -> bool {
-        use waker_fn::waker_fn;
-        let deadline = timeout.map(|t| Instant::now() + t);
-        let parker = parking::Parker::new();
-        let unparker = parker.unparker();
-        let waker = waker_fn(move || {
-            unparker.unpark();
-        });
-        let mut cx = Context::from_waker(&waker);
-        if let Poll::Ready(()) = future.as_mut().poll(&mut cx) {
-            return true;
+        #[cfg(target_family = "wasm")]
+        {
+            let _ = (&future, &timeout);
+            panic!("Cannot block on wasm")
         }
-
-        let park_deadline = |deadline: Instant| {
-            // Timer expirations are only delivered every ~15.6 milliseconds by default on Windows.
-            // We increase the resolution during this wait so that short timeouts stay reasonably short.
-            let _timer_guard = self.dispatcher.increase_timer_resolution();
-            parker.park_deadline(deadline)
-        };
-
-        loop {
-            match deadline {
-                Some(deadline) if !park_deadline(deadline) && deadline <= Instant::now() => {
-                    return false;
-                }
-                Some(_) => (),
-                None => parker.park(),
-            }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            use waker_fn::waker_fn;
+            let deadline = timeout.map(|t| Instant::now() + t);
+            let parker = parking::Parker::new();
+            let unparker = parker.unparker();
+            let waker = waker_fn(move || {
+                unparker.unpark();
+            });
+            let mut cx = Context::from_waker(&waker);
             if let Poll::Ready(()) = future.as_mut().poll(&mut cx) {
-                break true;
+                return true;
+            }
+
+            let park_deadline = |deadline: Instant| {
+                // Timer expirations are only delivered every ~15.6 milliseconds by default on Windows.
+                // We increase the resolution during this wait so that short timeouts stay reasonably short.
+                let _timer_guard = self.dispatcher.increase_timer_resolution();
+                parker.park_deadline(deadline)
+            };
+
+            loop {
+                match deadline {
+                    Some(deadline) if !park_deadline(deadline) && deadline <= Instant::now() => {
+                        return false;
+                    }
+                    Some(_) => (),
+                    None => parker.park(),
+                }
+                if let Poll::Ready(()) = future.as_mut().poll(&mut cx) {
+                    break true;
+                }
             }
         }
     }

@@ -44,7 +44,6 @@ use objc::{
     runtime::{Class, Object, Sel},
     sel, sel_impl,
 };
-use objc2::MainThreadMarker;
 use parking_lot::Mutex;
 use ptr::null_mut;
 use semver::Version;
@@ -164,7 +163,7 @@ unsafe fn build_classes() {
     }
 }
 
-pub struct MacPlatform(Mutex<MacPlatformState>, MainThreadMarker);
+pub struct MacPlatform(Mutex<MacPlatformState>);
 
 pub(crate) struct MacPlatformState {
     background_executor: BackgroundExecutor,
@@ -196,7 +195,6 @@ pub(crate) struct MacPlatformState {
 
 impl MacPlatform {
     pub fn new(headless: bool) -> Self {
-        let marker = MainThreadMarker::new().expect("Mac platform not created on main thread");
         let dispatcher = Arc::new(MacDispatcher::new());
 
         #[cfg(feature = "font-kit")]
@@ -215,7 +213,7 @@ impl MacPlatform {
         let keyboard_layout = MacKeyboardLayout::new();
         let keyboard_mapper = Rc::new(MacKeyboardMapper::new(keyboard_layout.id()));
 
-        let state = Mutex::new(MacPlatformState {
+        Self(Mutex::new(MacPlatformState {
             headless,
             text_system,
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
@@ -240,8 +238,7 @@ impl MacPlatform {
             keyboard_mapper,
             cursor_visible: Arc::new(AtomicBool::new(true)),
             system_notifications: crate::system_notifications::SystemNotificationState::new(),
-        });
-        Self(state, marker)
+        }))
     }
 
     unsafe fn create_menu_bar(
@@ -677,7 +674,6 @@ impl Platform for MacPlatform {
             foreground_executor,
             background_executor,
             renderer_context,
-            self.1,
         )))
     }
 

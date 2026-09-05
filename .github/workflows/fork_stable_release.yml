@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -42,9 +43,52 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Fetch all RP release tags
         run: git fetch --force --tags origin
+
+      - name: Require a reviewed merge into RP stable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr="$(
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+              --jq '[.[] | select(
+                .merged_at != null and
+                .base.ref == "release/rp-stable" and
+                .merge_commit_sha == env.GITHUB_SHA
+              )] | if length == 1 then .[0] else empty end'
+          )"
+          test -n "$pr"
+          pr_number="$(jq -r .number <<<"$pr")"
+          pr_author="$(jq -r .user.login <<<"$pr")"
+          head_sha="$(jq -r .head.sha <<<"$pr")"
+          approved="$(
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}/reviews" |
+              jq -r --arg author "$pr_author" '
+                group_by(.user.login)
+                | map(sort_by(.submitted_at) | last)
+                | any(.state == "APPROVED" and .user.login != $author)
+              '
+          )"
+          test "$approved" = "true"
+          validation="$(
+            gh api "repos/${GITHUB_REPOSITORY}/commits/${head_sha}/check-runs" \
+              --jq '[.check_runs[] | select(
+                .name == "Validate RP stable compatibility" and
+                .conclusion == "success"
+              )] | length'
+          )"
+          test "$validation" -ge 1
+
+      - name: Verify pinned upstream stable base
+        run: |
+          tag="$(python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])')"
+          git fetch --no-tags https://github.com/zed-industries/zed.git \
+            "refs/tags/${tag}:refs/tags/${tag}"
+          python3 script/rp_stable_base.py verify --previous-ref HEAD^1
 
       - name: Allocate calendar version and curate notes
         id: allocate
@@ -75,6 +119,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
 
       - name: Download RP release metadata
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -120,6 +169,17 @@ jobs:
           ZED_REQUIRE_SCCACHE: "1"
           ZED_CLIENT_CHECKSUM_SEED: fork-unsigned-stable
         run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) {
+            throw "Windows checkout does not match release commit"
+          }
+          $stableTag = (
+            Get-Content -Raw ".github/rp-stable-base.json" |
+              ConvertFrom-Json
+          ).upstream_tag
+          git fetch --no-tags https://github.com/zed-industries/zed.git `
+            "refs/tags/${stableTag}:refs/tags/${stableTag}"
+          python script/rp_stable_base.py verify
+
           script/test-bundle-windows-identity.ps1
 
           $metadataPath = "target/rp-release-metadata/rp-release-manifest.json"
@@ -129,9 +189,12 @@ jobs:
           }
           $env:ZED_RP_RELEASE_VERSION = $metadata.calendar_version
           $env:ZED_RP_RELEASE_TAG = $metadata.tag
+          $env:ZED_RP_UPSTREAM_TAG = $metadata.upstream_tag
+          $env:ZED_RP_UPSTREAM_TAG_COMMIT = $metadata.upstream_tag_commit
           $env:ZED_RP_RELEASE_NOTES = Get-Content -Raw "target/rp-release-metadata/release-notes.md"
           $env:ZED_RP_RELEASE_NOTES_IDENTITY = $metadata.notes_identity
           $env:ZED_RP_RELEASE_MANIFEST = Get-Content -Raw $metadataPath
+          Copy-Item $metadataPath target/windows-source-identity.json
 
           $bundleStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
           try {
@@ -175,6 +238,7 @@ jobs:
             target/Zed-rp-stable-${{ needs.metadata.outputs.version }}-windows-x86_64.exe
             target/zed-rp-stable-${{ needs.metadata.outputs.version }}-windows-x86_64-portable.zip
             target/zed-rp-stable-${{ needs.metadata.outputs.version }}-remote-server-windows-x86_64.zip
+            target/windows-source-identity.json
           if-no-files-found: error
           retention-days: 30
 
@@ -189,6 +253,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Download RP release metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: rp-release-metadata-${{ needs.metadata.outputs.version }}
+          path: target/rp-release-metadata
 
       - name: Cache Cargo sources
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -221,6 +296,14 @@ jobs:
           RUSTFLAGS: -C target-feature=+crt-static
           ZED_RELEASE_CHANNEL: stable
         run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          tag="$(python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])')"
+          git fetch --no-tags https://github.com/zed-industries/zed.git \
+            "refs/tags/${tag}:refs/tags/${tag}"
+          python3 script/rp_stable_base.py verify --previous-ref HEAD^1
+          cp target/rp-release-metadata/rp-release-manifest.json \
+            target/linux-source-identity.json
+
           printf stable > crates/zed/RELEASE_CHANNEL
           export RELEASE_VERSION="$(script/get-crate-version zed)"
           build_start=$SECONDS
@@ -243,7 +326,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: rp-package-linux-x86_64-${{ needs.metadata.outputs.version }}
-          path: target/zed-rp-stable-${{ needs.metadata.outputs.version }}-remote-server-linux-x86_64.gz
+          path: |
+            target/zed-rp-stable-${{ needs.metadata.outputs.version }}-remote-server-linux-x86_64.gz
+            target/linux-source-identity.json
           if-no-files-found: error
           retention-days: 30
 
@@ -278,6 +363,9 @@ jobs:
         env:
           RP_VERSION: ${{ needs.metadata.outputs.version }}
         run: |
+          cmp dist/windows-source-identity.json dist/linux-source-identity.json
+          cmp dist/windows-source-identity.json metadata/rp-release-manifest.json
+          rm dist/windows-source-identity.json dist/linux-source-identity.json
           version="${RP_VERSION}"
           cp metadata/rp-release-manifest.json \
             "dist/rp-release-manifest-${version}.json"
@@ -320,6 +408,7 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
       - name: Download release assets
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -340,7 +429,9 @@ jobs:
           RP_VERSION: ${{ needs.metadata.outputs.version }}
           RP_REUSED: ${{ needs.metadata.outputs.reused }}
         run: |
-          title="RP Fork Release Notes ${RP_VERSION}"
+          upstream_version="$(python3 -c 'import json; print(json.load(open("metadata/rp-release-manifest.json"))["upstream_version"])')"
+          upstream_tag="$(python3 -c 'import json; print(json.load(open("metadata/rp-release-manifest.json"))["upstream_tag"])')"
+          title="RP ${RP_VERSION} (Zed ${upstream_version} stable; ${upstream_tag})"
           if gh release view "$RP_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             git fetch --force origin "refs/tags/${RP_TAG}:refs/tags/${RP_TAG}"
             tag_sha="$(git rev-list -n 1 "refs/tags/${RP_TAG}")"

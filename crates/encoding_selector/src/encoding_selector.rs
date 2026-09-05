@@ -305,7 +305,7 @@ impl PickerDelegate for EncodingSelectorDelegate {
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<Self>>) {
         self.encoding_selector
             .update(cx, |_, cx| cx.emit(DismissEvent))
-            .ok();
+            .log_err();
     }
 
     fn render_match(

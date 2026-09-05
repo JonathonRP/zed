@@ -1,6 +1,7 @@
 use gpui::{
     Action, App, AppContext as _, Entity, EventEmitter, FocusHandle, Focusable,
     KeyBindingContextPredicate, KeyContext, Keystroke, MouseButton, Render, Subscription, Task,
+    actions,
 };
 use itertools::Itertools;
 use serde_json::json;
@@ -11,7 +12,14 @@ use ui::{
     h_flex, px, v_flex,
 };
 use workspace::{Item, SplitDirection, Workspace};
-use zed_actions::dev::OpenKeyContextView;
+
+actions!(
+    dev,
+    [
+        /// Opens the key context view for debugging keybindings.
+        OpenKeyContextView
+    ]
+);
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _, _| {

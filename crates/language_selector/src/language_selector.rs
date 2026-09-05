@@ -232,7 +232,7 @@ impl PickerDelegate for LanguageSelectorDelegate {
     fn dismissed(&mut self, _: &mut Window, cx: &mut Context<Picker<Self>>) {
         self.language_selector
             .update(cx, |_, cx| cx.emit(DismissEvent))
-            .ok();
+            .log_err();
     }
 
     fn selected_index(&self) -> usize {

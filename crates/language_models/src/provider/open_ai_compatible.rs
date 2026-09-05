@@ -3,13 +3,12 @@ use credentials_provider::CredentialsProvider;
 use futures::{FutureExt, StreamExt, future::BoxFuture};
 use gpui::{App, AppContext, AsyncApp, Entity, Task};
 use http_client::{CustomHeaders, HttpClient};
-use language_model::chat_completion::ChatCompletionEventMapper;
 use language_model::{
     AuthenticateError, IconOrSvg, LanguageModel, LanguageModelCompletionError,
     LanguageModelCompletionEvent, LanguageModelEffortLevel, LanguageModelId, LanguageModelName,
     LanguageModelProvider, LanguageModelProviderId, LanguageModelProviderName,
     LanguageModelProviderState, LanguageModelRequest, LanguageModelToolChoice,
-    ProviderSettingsView, RateLimiter, SubPageProviderSettings,
+    LanguageModelToolSchemaFormat, ProviderSettingsView, RateLimiter, SubPageProviderSettings,
 };
 use open_ai::{
     ResponseStreamEvent,
@@ -24,7 +23,9 @@ use crate::provider::api_compatible::{
     ApiCompatibleProviderConfigurationView, ApiCompatibleProviderSettings,
     ApiCompatibleProviderState,
 };
-use crate::provider::open_ai::{OpenAiResponseEventMapper, into_open_ai, into_open_ai_response};
+use crate::provider::open_ai::{
+    OpenAiEventMapper, OpenAiResponseEventMapper, into_open_ai, into_open_ai_response,
+};
 pub use settings::OpenAiCompatibleAvailableModel as AvailableModel;
 pub use settings::OpenAiCompatibleModelCapabilities as ModelCapabilities;
 
@@ -357,6 +358,10 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
         self.model.capabilities.tools
     }
 
+    fn tool_input_format(&self) -> LanguageModelToolSchemaFormat {
+        LanguageModelToolSchemaFormat::JsonSchemaSubset
+    }
+
     fn supports_images(&self) -> bool {
         self.model.capabilities.images
     }
@@ -433,13 +438,9 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
                 Err(error) => return async move { Err(error.into()) }.boxed(),
             };
             let completions = self.stream_completion(request, cx);
-            let executor = cx.background_executor().clone();
             async move {
-                let mapper = ChatCompletionEventMapper::new();
-                Ok(language_model::stream_in_background(
-                    mapper.map_stream(completions.await?).boxed(),
-                    executor,
-                ))
+                let mapper = OpenAiEventMapper::new();
+                Ok(mapper.map_stream(completions.await?).boxed())
             }
             .boxed()
         } else {
@@ -459,13 +460,9 @@ impl LanguageModel for OpenAiCompatibleLanguageModel {
             };
             let completions = self.stream_response(request, cx);
             let compaction_state_owner = self.provider_id.clone();
-            let executor = cx.background_executor().clone();
             async move {
                 let mapper = OpenAiResponseEventMapper::new(compaction_state_owner);
-                Ok(language_model::stream_in_background(
-                    mapper.map_stream(completions.await?).boxed(),
-                    executor,
-                ))
+                Ok(mapper.map_stream(completions.await?).boxed())
             }
             .boxed()
         }

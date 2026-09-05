@@ -270,14 +270,6 @@ pub fn deploy_context_menu(
                     "Find All References",
                     Box::new(FindAllReferences::default()),
                 )
-                .action(
-                    "Show Incoming Calls",
-                    Box::new(zed_actions::ShowIncomingCalls),
-                )
-                .action(
-                    "Show Outgoing Calls",
-                    Box::new(zed_actions::ShowOutgoingCalls),
-                )
                 .separator()
                 .action("Rename Symbol", Box::new(Rename))
                 .action("Format Buffer", Box::new(Format))
@@ -318,7 +310,7 @@ pub fn deploy_context_menu(
                 )
                 .action_disabled_when(
                     !has_git_repo,
-                    "Copy Permalink to Line",
+                    "Copy Permalink",
                     Box::new(CopyPermalinkToLine),
                 )
                 .action_disabled_when(

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use ::lsp::LanguageServerName;
 use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
-use gpui::{App, EntityId, Task};
+use gpui::{App, Task};
 use language::LanguageName;
 use semver::Version;
 use task::{SpawnInTerminal, ZedDebugConfig};
@@ -64,7 +64,6 @@ pub trait Extension: Send + Sync + 'static {
         language_server_id: LanguageServerName,
         language_name: LanguageName,
         worktree: Arc<dyn WorktreeDelegate>,
-        language_server_status_source: EntityId,
     ) -> Result<Command>;
 
     async fn language_server_initialization_options(
@@ -72,28 +71,24 @@ pub trait Extension: Send + Sync + 'static {
         language_server_id: LanguageServerName,
         language_name: LanguageName,
         worktree: Arc<dyn WorktreeDelegate>,
-        language_server_status_source: EntityId,
     ) -> Result<Option<String>>;
 
     async fn language_server_workspace_configuration(
         &self,
         language_server_id: LanguageServerName,
         worktree: Arc<dyn WorktreeDelegate>,
-        language_server_status_source: EntityId,
     ) -> Result<Option<String>>;
 
     async fn language_server_initialization_options_schema(
         &self,
         language_server_id: LanguageServerName,
         worktree: Arc<dyn WorktreeDelegate>,
-        language_server_status_source: EntityId,
     ) -> Result<Option<String>>;
 
     async fn language_server_workspace_configuration_schema(
         &self,
         language_server_id: LanguageServerName,
         worktree: Arc<dyn WorktreeDelegate>,
-        language_server_status_source: EntityId,
     ) -> Result<Option<String>>;
 
     async fn language_server_additional_initialization_options(
@@ -101,7 +96,6 @@ pub trait Extension: Send + Sync + 'static {
         language_server_id: LanguageServerName,
         target_language_server_id: LanguageServerName,
         worktree: Arc<dyn WorktreeDelegate>,
-        language_server_status_source: EntityId,
     ) -> Result<Option<String>>;
 
     async fn language_server_additional_workspace_configuration(
@@ -109,7 +103,6 @@ pub trait Extension: Send + Sync + 'static {
         language_server_id: LanguageServerName,
         target_language_server_id: LanguageServerName,
         worktree: Arc<dyn WorktreeDelegate>,
-        language_server_status_source: EntityId,
     ) -> Result<Option<String>>;
 
     async fn labels_for_completions(

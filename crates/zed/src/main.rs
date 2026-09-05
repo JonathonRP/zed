@@ -226,12 +226,22 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     if args.record_etw_trace {
+        let zed_pid = args
+            .etw_zed_pid
+            .and_then(|pid| if pid >= 0 { Some(pid as u32) } else { None });
+        let Some(output_path) = args.etw_output else {
+            eprintln!("--etw-output is required for --record-etw-trace");
+            process::exit(1);
+        };
+
         let Some(etw_socket) = args.etw_socket else {
             eprintln!("--etw-socket is required for --record-etw-trace");
             process::exit(1);
         };
 
-        if let Err(error) = etw_tracing::record_etw_trace(args.etw_zed_pid, &etw_socket) {
+        if let Err(error) =
+            etw_tracing::record_etw_trace(zed_pid, &output_path, etw_socket.as_str())
+        {
             eprintln!("ETW trace recording failed: {error:#}");
             process::exit(1);
         }
@@ -738,7 +748,6 @@ fn main() {
         file_finder::init(cx);
         tab_switcher::init(cx);
         outline::init(cx);
-        call_hierarchy::init(cx);
         project_symbols::init(cx);
         project_panel::init(cx);
         outline_panel::init(cx);
@@ -1778,13 +1787,18 @@ struct Args {
 
     /// The PID of the Zed process to trace for heap analysis.
     #[cfg(target_os = "windows")]
+    #[arg(long, hide = true, allow_hyphen_values = true)]
+    etw_zed_pid: Option<i64>,
+
+    /// Output path for the ETW trace file.
+    #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
-    etw_zed_pid: Option<u32>,
+    etw_output: Option<PathBuf>,
 
     /// Unix socket path for IPC with the parent Zed process.
     #[cfg(target_os = "windows")]
     #[arg(long, hide = true)]
-    etw_socket: Option<PathBuf>,
+    etw_socket: Option<String>,
 }
 
 #[derive(Clone, Debug)]

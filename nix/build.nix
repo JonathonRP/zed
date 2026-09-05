@@ -67,7 +67,6 @@ let
       relPath = lib.removePrefix root path;
       topLevelIncludes = [
         "crates"
-        "corgi-patches"
         "assets"
         "extensions"
         "script"
@@ -80,10 +79,6 @@ let
     in
     builtins.elem firstComp topLevelIncludes;
 
-  corgiPatches = builtins.path {
-    path = ../corgi-patches;
-    name = "corgi-patches";
-  };
   craneLib = crane.overrideToolchain rustToolchain;
   gpu-lib = if withGLES then libglvnd else vulkan-loader;
   commonArgs =
@@ -310,20 +305,7 @@ let
             drv;
       };
     };
-  cargoArtifacts = craneLib.buildDepsOnly (
-    builtins.removeAttrs commonArgs [ "src" ]
-    // {
-      dummySrc = craneLib.mkDummySrc {
-        inherit (commonArgs) src cargoLock;
-        # `scratch` is a local dependency of `cxx-build`, so its API is needed
-        # while Crane builds third-party dependencies.
-        extraDummyScript = ''
-          rm -rf $out/corgi-patches
-          cp --recursive ${corgiPatches} $out/corgi-patches
-        '';
-      };
-    }
-  );
+  cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 in
 craneLib.buildPackage (
   lib.recursiveUpdate commonArgs {

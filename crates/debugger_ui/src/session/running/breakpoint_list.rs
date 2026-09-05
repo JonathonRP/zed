@@ -1,4 +1,9 @@
-use std::{ops::Range, path::Path, sync::Arc, time::Duration};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use dap::{Capabilities, ExceptionBreakpointsFilter, adapters::DebugAdapterName};
 use db::kvp::KeyValueStore;
@@ -22,7 +27,7 @@ use ui::{
     Divider, DividerColor, FluentBuilder as _, Indicator, IntoElement, ListItem, Render,
     ScrollAxes, StatefulInteractiveElement, Tooltip, WithScrollbar, prelude::*,
 };
-use util::paths::PathExt;
+use util::rel_path::RelPath;
 use workspace::Workspace;
 use zed_actions::{ToggleEnableBreakpoint, UnsetBreakpoint};
 
@@ -663,7 +668,7 @@ impl Render for BreakpointList {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl ui::IntoElement {
         let breakpoints = self.breakpoint_store.read(cx).all_source_breakpoints(cx);
         self.breakpoints.clear();
-        let multiple_worktrees = self.worktree_store.read(cx).visible_worktrees(cx).count() > 1;
+        let path_style = self.worktree_store.read(cx).path_style();
         let weak = cx.weak_entity();
         let breakpoints = breakpoints.into_iter().flat_map(|(path, mut breakpoints)| {
             let relative_worktree_path = self
@@ -671,26 +676,23 @@ impl Render for BreakpointList {
                 .read(cx)
                 .find_worktree(&path, cx)
                 .and_then(|(worktree, relative_path)| {
-                    worktree.read(cx).is_visible().then(|| {
-                        if multiple_worktrees {
-                            worktree.read(cx).root_name().join(&relative_path)
-                        } else {
-                            relative_path.to_rel_path_buf()
-                        }
-                    })
+                    worktree
+                        .read(cx)
+                        .is_visible()
+                        .then(|| worktree.read(cx).root_name().join(&relative_path))
                 });
             breakpoints.sort_by_key(|breakpoint| breakpoint.row);
             let weak = weak.clone();
             breakpoints.into_iter().filter_map(move |breakpoint| {
                 debug_assert_eq!(&path, &breakpoint.path);
                 let file_name = breakpoint.path.file_name()?;
+                let breakpoint_path = RelPath::new(&breakpoint.path, path_style).ok();
 
                 let dir = relative_worktree_path
                     .as_deref()
-                    .map(|rel_path| rel_path.as_std_path())
-                    .unwrap_or(&breakpoint.path.as_ref().compact())
+                    .or(breakpoint_path.as_deref())?
                     .parent()
-                    .map(|parent| SharedString::from(parent.display().to_string()));
+                    .map(|parent| SharedString::from(parent.display(path_style).to_string()));
                 let name = file_name
                     .to_str()
                     .map(ToOwned::to_owned)
@@ -926,12 +928,19 @@ impl LineBreakpoint {
                                 .size(LabelSize::Small)
                                 .line_height_style(ui::LineHeightStyle::UiLabel),
                         )
-                        .children(self.dir.as_ref().map(|dir| {
-                            Label::new(dir)
-                                .color(Color::Muted)
-                                .size(LabelSize::Small)
-                                .line_height_style(ui::LineHeightStyle::UiLabel)
-                                .truncate()
+                        .children(self.dir.as_ref().and_then(|dir| {
+                            let path_without_root = Path::new(dir.as_ref())
+                                .components()
+                                .skip(1)
+                                .collect::<PathBuf>();
+                            path_without_root.components().next()?;
+                            Some(
+                                Label::new(path_without_root.to_string_lossy().into_owned())
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small)
+                                    .line_height_style(ui::LineHeightStyle::UiLabel)
+                                    .truncate(),
+                            )
                         }))
                         .when_some(self.dir.as_ref(), |this, parent_dir| {
                             this.tooltip(Tooltip::text(format!(

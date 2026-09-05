@@ -2,15 +2,12 @@ use std::borrow::Cow;
 
 use anyhow::Context as _;
 use language_core::{LanguageConfig, LanguageQueries, QueryFile, QueryFileContents};
+use rust_embed::RustEmbed;
 
-// Dev builds read the checkout's query files at runtime instead of embedding
-// them; see the `assets` crate for the rationale.
-util::fs_embed! {
-    struct GrammarDir,
-    crate_relative = "src/",
-    root_relative = "crates/grammars/src",
-    exclude = ["*.rs"],
-}
+#[derive(RustEmbed)]
+#[folder = "src/"]
+#[exclude = "*.rs"]
+struct GrammarDir;
 
 /// Register all built-in native tree-sitter grammars with the provided registration function.
 ///

@@ -734,7 +734,7 @@ pub(crate) fn active_buffer_diagnostics(
             (
                 severity,
                 zeta_prompt::clamp_text_to_token_count(
-                    entry.diagnostic.message.as_str(),
+                    &entry.diagnostic.message,
                     MAX_ACTIVE_BUFFER_DIAGNOSTIC_MESSAGE_TOKENS_TO_COLLECT,
                 )
                 .to_string(),

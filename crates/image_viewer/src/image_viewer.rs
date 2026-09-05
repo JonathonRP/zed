@@ -737,6 +737,7 @@ impl SerializableItem for ImageView {
         workspace: &mut Workspace,
         item_id: ItemId,
         _closing: bool,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Task<anyhow::Result<()>>> {
         let workspace_id = workspace.database_id()?;
@@ -984,8 +985,8 @@ impl Render for ImageViewToolbarControls {
                     })
                     .child(editor.clone())
                     .on_action::<menu::Confirm>({
-                        move |_: &menu::Confirm, window, cx| {
-                            window.blur(cx);
+                        move |_: &menu::Confirm, window, _| {
+                            window.blur();
                         }
                     })
                     .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| {

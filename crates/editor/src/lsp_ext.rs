@@ -151,7 +151,6 @@ pub fn lsp_tasks(
                             GetLspRunnables {
                                 buffer_id,
                                 position: for_position,
-                                server_id,
                             },
                             cx,
                         )

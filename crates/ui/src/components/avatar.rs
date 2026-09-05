@@ -89,7 +89,7 @@ impl RenderOnce for Avatar {
             })
             .child(
                 self.image
-                    .size_full()
+                    .size(image_size)
                     .rounded_full()
                     .bg(cx.theme().colors().element_disabled)
                     .with_fallback(|| {

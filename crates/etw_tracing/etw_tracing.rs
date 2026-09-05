@@ -5,6 +5,7 @@ use gpui::{App, AppContext as _, DismissEvent, Global, actions};
 use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use util::{ResultExt as _, defer};
 use windows::Win32::Foundation::{VARIANT_BOOL, VARIANT_FALSE};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoInitializeEx};
@@ -29,17 +30,10 @@ actions!(
 
 struct EtwNotification;
 
-enum EtwSessionState {
-    Recording,
-    ChoosingOutputPath,
-    Stopping,
-}
-
 struct EtwSessionHandle {
     writer: net::OwnedWriteHalf,
     _listener: net::UnixListener,
     socket_path: PathBuf,
-    state: EtwSessionState,
 }
 
 impl Drop for EtwSessionHandle {
@@ -52,6 +46,10 @@ struct GlobalEtwSession(Option<EtwSessionHandle>);
 
 impl Global for GlobalEtwSession {}
 
+fn has_active_etw_session(cx: &App) -> bool {
+    cx.global::<GlobalEtwSession>().0.is_some()
+}
+
 fn show_etw_notification(cx: &mut App, message: impl Into<gpui::SharedString>) {
     let message = message.into();
     show_app_notification(NotificationId::unique::<EtwNotification>(), cx, move |cx| {
@@ -59,30 +57,59 @@ fn show_etw_notification(cx: &mut App, message: impl Into<gpui::SharedString>) {
     });
 }
 
-fn show_etw_status_notification(cx: &mut App, status: Result<StatusMessage>) {
+fn show_etw_notification_with_action(
+    cx: &mut App,
+    message: impl Into<gpui::SharedString>,
+    button_label: impl Into<gpui::SharedString>,
+    on_click: impl Fn(&mut gpui::Window, &mut gpui::Context<MessageNotification>)
+    + Send
+    + Sync
+    + 'static,
+) {
+    let message = message.into();
+    let button_label = button_label.into();
+    let on_click = std::sync::Arc::new(on_click);
+    show_app_notification(NotificationId::unique::<EtwNotification>(), cx, move |cx| {
+        let message = message.clone();
+        let button_label = button_label.clone();
+        cx.new(|cx| {
+            MessageNotification::new(message, cx)
+                .primary_message(button_label)
+                .primary_on_click_arc(on_click.clone())
+        })
+    });
+}
+
+fn show_etw_status_notification(cx: &mut App, status: Result<StatusMessage>, output_path: PathBuf) {
     match status {
-        Ok(StatusMessage::Stopped { output_path }) => {
-            let message = format!("ETW trace saved to {}", output_path.display());
-            show_app_notification(NotificationId::unique::<EtwNotification>(), cx, move |cx| {
-                let message = message.clone();
-                let output_path = output_path.clone();
-                cx.new(|cx| {
-                    MessageNotification::new(message, cx)
-                        .primary_message("Show in File Manager")
-                        .primary_on_click(move |_window, cx| {
-                            cx.reveal_path(&output_path);
-                            cx.emit(DismissEvent);
-                        })
-                })
-            });
+        Ok(StatusMessage::Stopped) => {
+            let display_path = output_path.display().to_string();
+            show_etw_notification_with_action(
+                cx,
+                format!("ETW trace saved to {display_path}"),
+                "Show in File Manager",
+                move |_window, cx| {
+                    cx.reveal_path(&output_path);
+                    cx.emit(DismissEvent);
+                },
+            );
+        }
+        Ok(StatusMessage::TimedOut) => {
+            let display_path = output_path.display().to_string();
+            show_etw_notification_with_action(
+                cx,
+                format!("ETW recording timed out. Trace saved to {display_path}"),
+                "Show in File Manager",
+                move |_window, cx| {
+                    cx.reveal_path(&output_path);
+                    cx.emit(DismissEvent);
+                },
+            );
         }
         Ok(StatusMessage::Cancelled) => {
             show_etw_notification(cx, "ETW recording cancelled");
         }
-        Ok(StatusMessage::Error { message }) => {
-            show_etw_notification(cx, format!("ETW recording failed: {message}"));
-        }
-        Ok(StatusMessage::Started) => {
+        Ok(_) => {
             show_etw_notification(cx, "ETW recording ended unexpectedly");
         }
         Err(error) => {
@@ -103,113 +130,67 @@ pub fn init(cx: &mut App) {
     });
 
     cx.on_action(|_: &SaveEtwTrace, cx: &mut App| {
-        prompt_for_etw_output_path(cx);
+        let session = cx.global_mut::<GlobalEtwSession>().0.as_mut();
+        let Some(session) = session else {
+            show_etw_notification(cx, "No active ETW recording to stop");
+            return;
+        };
+        match send_json(&mut session.writer, &Command::Save) {
+            Ok(()) => {
+                show_etw_notification(cx, "Stopping ETW recording...");
+            }
+            Err(error) => {
+                show_etw_notification(cx, format!("Failed to stop ETW recording: {error:#}"));
+            }
+        }
     });
 
     cx.on_action(|_: &CancelEtwTrace, cx: &mut App| {
-        cancel_etw_recording(cx);
+        let session = cx.global_mut::<GlobalEtwSession>().0.as_mut();
+        let Some(session) = session else {
+            show_etw_notification(cx, "No active ETW recording to cancel");
+            return;
+        };
+        match send_json(&mut session.writer, &Command::Cancel) {
+            Ok(()) => {
+                show_etw_notification(cx, "Cancelling ETW recording...");
+            }
+            Err(error) => {
+                show_etw_notification(cx, format!("Failed to cancel ETW recording: {error:#}"));
+            }
+        }
     });
 }
 
-fn prompt_for_etw_output_path(cx: &mut App) {
-    let Some(session) = cx.global_mut::<GlobalEtwSession>().0.as_mut() else {
-        show_etw_notification(cx, "No active ETW recording to stop");
-        return;
-    };
-    match &session.state {
-        EtwSessionState::Recording => {
-            session.state = EtwSessionState::ChoosingOutputPath;
-        }
-        EtwSessionState::ChoosingOutputPath => {
-            show_etw_notification(cx, "ETW recording is already waiting for a save location");
-            return;
-        }
-        EtwSessionState::Stopping => {
-            show_etw_notification(cx, "ETW recording is already stopping");
-            return;
-        }
-    }
-
-    let save_dialog = cx.prompt_for_new_path(&PathBuf::default(), Some("zed-trace.etl"));
-    cx.spawn(async move |cx| {
-        let picked = save_dialog.await.unwrap_or(Ok(None));
-        cx.update(|cx| match picked {
-            Ok(Some(output_path)) => save_etw_recording(output_path, cx),
-            Ok(None) => resume_etw_recording(cx),
-            Err(error) => {
-                resume_etw_recording(cx);
-                show_etw_notification(cx, format!("Failed to pick save location: {error:#}"));
-            }
-        });
-    })
-    .detach();
-}
-
-fn save_etw_recording(output_path: PathBuf, cx: &mut App) {
-    let Some(session) = cx.global_mut::<GlobalEtwSession>().0.as_mut() else {
-        return;
-    };
-    if !matches!(&session.state, EtwSessionState::ChoosingOutputPath) {
-        return;
-    }
-
-    let command = Command::Save {
-        output_path: output_path.clone(),
-    };
-    match send_json(&mut session.writer, &command) {
-        Ok(()) => {
-            session.state = EtwSessionState::Stopping;
-            show_etw_notification(cx, "Stopping ETW recording...");
-        }
-        Err(error) => {
-            session.state = EtwSessionState::Recording;
-            show_etw_notification(cx, format!("Failed to stop ETW recording: {error:#}"));
-        }
-    }
-}
-
-fn resume_etw_recording(cx: &mut App) {
-    let Some(session) = cx.global_mut::<GlobalEtwSession>().0.as_mut() else {
-        return;
-    };
-    if matches!(&session.state, EtwSessionState::ChoosingOutputPath) {
-        session.state = EtwSessionState::Recording;
-    }
-}
-
-fn cancel_etw_recording(cx: &mut App) {
-    let Some(session) = cx.global_mut::<GlobalEtwSession>().0.as_mut() else {
-        show_etw_notification(cx, "No active ETW recording to cancel");
-        return;
-    };
-    if matches!(&session.state, EtwSessionState::Stopping) {
-        show_etw_notification(cx, "ETW recording is already stopping");
-        return;
-    }
-
-    match send_json(&mut session.writer, &Command::Cancel) {
-        Ok(()) => {
-            session.state = EtwSessionState::Stopping;
-            show_etw_notification(cx, "Cancelling ETW recording...");
-        }
-        Err(error) => {
-            session.state = EtwSessionState::Recording;
-            show_etw_notification(cx, format!("Failed to cancel ETW recording: {error:#}"));
-        }
-    }
-}
-
 fn start_etw_recording(cx: &mut App, heap_pid: Option<u32>) {
-    if cx.global::<GlobalEtwSession>().0.is_some() {
+    if has_active_etw_session(cx) {
         show_etw_notification(cx, "ETW recording is already in progress");
         return;
     }
+    let save_dialog = cx.prompt_for_new_path(&PathBuf::default(), Some("zed-trace.etl"));
     cx.spawn(async move |cx| {
+        let output_path = match save_dialog.await {
+            Ok(Ok(Some(path))) => path,
+            Ok(Ok(None)) => return,
+            Ok(Err(error)) => {
+                cx.update(|cx| {
+                    show_etw_notification(cx, format!("Failed to pick save location: {error:#}"));
+                });
+                return;
+            }
+            Err(_) => return,
+        };
+
         let result = cx
-            .background_spawn(async move { launch_etw_recording(heap_pid) })
+            .background_spawn(async move { launch_etw_recording(heap_pid, &output_path) })
             .await;
 
-        let EtwSession { mut reader, handle } = match result {
+        let EtwSession {
+            output_path,
+            stream,
+            listener,
+            socket_path,
+        } = match result {
             Ok(session) => session,
             Err(error) => {
                 cx.update(|cx| {
@@ -219,23 +200,35 @@ fn start_etw_recording(cx: &mut App, heap_pid: Option<u32>) {
             }
         };
 
-        cx.update(|cx| {
-            cx.global_mut::<GlobalEtwSession>().0 = Some(handle);
-            show_etw_notification(cx, "ETW recording started");
-        });
+        let (read_half, write_half) = stream.into_inner().into_split();
 
-        let status = cx
-            .background_spawn(async move {
-                recv_json(&mut reader).context("Receive status from subprocess")
-            })
-            .await;
+        cx.spawn(async |cx| {
+            let status = cx
+                .background_spawn(async move {
+                    recv_json(&mut BufReader::new(read_half))
+                        .context("Receive status from subprocess")
+                })
+                .await;
+            cx.update(|cx| {
+                cx.global_mut::<GlobalEtwSession>().0 = None;
+                show_etw_status_notification(cx, status, output_path);
+            });
+        })
+        .detach();
+
         cx.update(|cx| {
-            cx.global_mut::<GlobalEtwSession>().0 = None;
-            show_etw_status_notification(cx, status);
+            cx.global_mut::<GlobalEtwSession>().0 = Some(EtwSessionHandle {
+                writer: write_half,
+                _listener: listener,
+                socket_path,
+            });
+            show_etw_notification(cx, "ETW recording started");
         });
     })
     .detach();
 }
+
+const RECORDING_TIMEOUT: Duration = Duration::from_secs(60);
 
 const INSTANCE_NAME: &str = "Zed";
 
@@ -445,16 +438,21 @@ fn build_profile_collection(heap_pid: Option<u32>) -> Result<IProfileCollection>
     Ok(collection)
 }
 
-pub fn record_etw_trace(heap_pid: Option<u32>, socket_path: &Path) -> Result<()> {
+pub fn record_etw_trace(
+    heap_pid: Option<u32>,
+    output_path: &Path,
+    socket_path: &str,
+) -> Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
             .context("COM initialization failed")?;
     }
 
+    let socket_path = Path::new(socket_path);
     let mut stream = net::UnixStream::connect(socket_path).context("Connect to parent socket")?;
 
-    match record_etw_trace_inner(heap_pid, &mut stream) {
+    match record_etw_trace_inner(heap_pid, output_path, &mut stream) {
         Ok(()) => Ok(()),
         Err(e) => {
             send_json(
@@ -469,7 +467,11 @@ pub fn record_etw_trace(heap_pid: Option<u32>, socket_path: &Path) -> Result<()>
     }
 }
 
-fn record_etw_trace_inner(heap_pid: Option<u32>, stream: &mut net::UnixStream) -> Result<()> {
+fn record_etw_trace_inner(
+    heap_pid: Option<u32>,
+    output_path: &Path,
+    stream: &mut net::UnixStream,
+) -> Result<()> {
     let collection = build_profile_collection(heap_pid)?;
     let control_manager: IControlManager = create_wpr(&CControlManager)?;
 
@@ -495,8 +497,7 @@ fn record_etw_trace_inner(heap_pid: Option<u32>, stream: &mut net::UnixStream) -
 
     send_json(stream, &StatusMessage::Started)?;
 
-    let command: Command =
-        recv_json(&mut BufReader::new(&mut *stream)).context("Receive command from Zed")?;
+    let (command, timed_out) = receive_command(stream)?;
 
     match command {
         Command::Cancel => {
@@ -510,7 +511,7 @@ fn record_etw_trace_inner(heap_pid: Option<u32>, stream: &mut net::UnixStream) -
 
             send_json(stream, &StatusMessage::Cancelled).log_err();
         }
-        Command::Save { output_path } => {
+        Command::Save => {
             unsafe {
                 control_manager
                     .Save(
@@ -523,37 +524,76 @@ fn record_etw_trace_inner(heap_pid: Option<u32>, stream: &mut net::UnixStream) -
             }
             cancel_guard.abort();
 
-            send_json(stream, &StatusMessage::Stopped { output_path }).log_err();
+            if timed_out {
+                send_json(stream, &StatusMessage::TimedOut).log_err();
+            } else {
+                send_json(stream, &StatusMessage::Stopped).log_err();
+            }
         }
     }
 
     Ok(())
 }
 
-struct EtwSession {
-    reader: BufReader<net::OwnedReadHalf>,
-    handle: EtwSessionHandle,
+fn receive_command(stream: &mut net::UnixStream) -> Result<(Command, bool)> {
+    use std::os::windows::io::{AsRawSocket, AsSocket};
+    use windows::Win32::Networking::WinSock::{SO_RCVTIMEO, SOL_SOCKET, setsockopt};
+
+    // Set a receive timeout so read_line returns an error after `timeout`.
+    let millis = RECORDING_TIMEOUT.as_millis() as u32;
+    let socket = stream.as_socket();
+    let ret = unsafe {
+        setsockopt(
+            windows::Win32::Networking::WinSock::SOCKET(socket.as_raw_socket() as _),
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            Some(&millis.to_ne_bytes()),
+        )
+    };
+    if ret != 0 {
+        bail!("Failed to set socket receive timeout: setsockopt returned {ret}");
+    }
+
+    let mut reader = BufReader::new(&mut *stream);
+    match recv_json::<Command>(&mut reader) {
+        Ok(command) => Ok((command, false)),
+        Err(error) => {
+            log::warn!("Failed to receive ETW command, treating as timed-out Save: {error:#}");
+            Ok((Command::Save, true))
+        }
+    }
 }
 
-fn launch_etw_recording(heap_pid: Option<u32>) -> Result<EtwSession> {
+pub struct EtwSession {
+    output_path: PathBuf,
+    stream: BufReader<net::UnixStream>,
+    listener: net::UnixListener,
+    socket_path: PathBuf,
+}
+
+pub fn launch_etw_recording(heap_pid: Option<u32>, output_path: &Path) -> Result<EtwSession> {
     let sock_path = std::env::temp_dir().join(format!("zed-etw-{}.sock", std::process::id()));
 
     _ = std::fs::remove_file(&sock_path);
     let listener = net::UnixListener::bind(&sock_path).context("Bind Unix socket for ETW IPC")?;
 
     let exe_path = std::env::current_exe().context("Failed to get current exe path")?;
-    let heap_arg = heap_pid.map_or(String::new(), |pid| format!(" --etw-zed-pid {pid}"));
+    let pid_arg = heap_pid.map_or(-1i64, |pid| pid as i64);
     let args = format!(
-        "--record-etw-trace{heap_arg} --etw-socket \"{}\"",
+        "--record-etw-trace --etw-zed-pid {} --etw-output \"{}\" --etw-socket \"{}\"",
+        pid_arg,
+        output_path.display(),
         sock_path.display(),
     );
 
     use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows_core::{HSTRING, PCWSTR};
+    use windows_core::PCWSTR;
 
-    let operation = HSTRING::from("runas");
-    let file = HSTRING::from(exe_path.to_string_lossy().as_ref());
-    let parameters = HSTRING::from(args);
+    let operation: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = format!("{}\0", exe_path.to_string_lossy())
+        .encode_utf16()
+        .collect();
+    let parameters: Vec<u16> = format!("{args}\0").encode_utf16().collect();
 
     let result = unsafe {
         ShellExecuteW(
@@ -572,10 +612,18 @@ fn launch_etw_recording(heap_pid: Option<u32>) -> Result<EtwSession> {
     }
 
     let (stream, _) = listener.accept().context("Accept subprocess connection")?;
-    let (read_half, write_half) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
 
-    match recv_json(&mut reader).context("Wait for Started status")? {
+    let mut session = EtwSession {
+        output_path: output_path.to_path_buf(),
+        stream: BufReader::new(stream),
+        listener,
+        socket_path: sock_path,
+    };
+
+    let status: StatusMessage =
+        recv_json(&mut session.stream).context("Wait for Started status")?;
+
+    match status {
         StatusMessage::Started => {}
         StatusMessage::Error { message } => {
             bail!("Subprocess reported error during start: {message}");
@@ -585,30 +633,23 @@ fn launch_etw_recording(heap_pid: Option<u32>) -> Result<EtwSession> {
         }
     }
 
-    Ok(EtwSession {
-        reader,
-        handle: EtwSessionHandle {
-            writer: write_half,
-            _listener: listener,
-            socket_path: sock_path,
-            state: EtwSessionState::Recording,
-        },
-    })
+    Ok(session)
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
-enum StatusMessage {
+pub enum StatusMessage {
     Started,
-    Stopped { output_path: PathBuf },
+    Stopped,
+    TimedOut,
     Cancelled,
     Error { message: String },
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type")]
-enum Command {
-    Save { output_path: PathBuf },
+pub enum Command {
+    Save,
     Cancel,
 }
 

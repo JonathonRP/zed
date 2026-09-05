@@ -51,15 +51,9 @@ impl ExtensionLanguageProxy for LanguageServerRegistryProxy {
         matcher: Arc<LanguageMatcher>,
         hidden: bool,
         load: LanguageLoader,
-    ) -> bool {
+    ) {
         self.language_registry
-            .register_extension_language(language, grammar, matcher, hidden, None, load)
-    }
-
-    fn is_language_registered(&self, language: &LanguageName) -> bool {
-        self.language_registry
-            .available_language_for_name(language.0.as_ref())
-            .is_some()
+            .register_language(language, grammar, matcher, hidden, None, load);
     }
 
     fn remove_languages(

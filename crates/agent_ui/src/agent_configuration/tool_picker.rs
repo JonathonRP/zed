@@ -327,7 +327,7 @@ impl PickerDelegate for ToolPickerDelegate {
     fn dismissed(&mut self, _window: &mut Window, cx: &mut Context<Picker<Self>>) {
         self.tool_picker
             .update(cx, |_this, cx| cx.emit(DismissEvent))
-            .ok();
+            .log_err();
     }
 
     fn render_match(

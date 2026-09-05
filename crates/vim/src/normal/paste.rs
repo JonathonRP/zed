@@ -166,7 +166,7 @@ impl Vim {
                         selection.start..end_point
                     } else if line_mode {
                         let point = if before {
-                            movement::line_beginning(&display_map, selection.start)
+                            movement::line_beginning(&display_map, selection.start, false)
                         } else {
                             movement::line_end(&display_map, selection.start, false)
                         };

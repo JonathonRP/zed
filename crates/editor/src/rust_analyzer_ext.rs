@@ -89,7 +89,6 @@ pub fn go_to_parent_module(
                 project_id,
                 buffer_id: buffer_id.to_proto(),
                 position: Some(serialize_anchor(&trigger_anchor)),
-                server_id: server_to_query.to_proto(),
             };
             let response = client
                 .request(request)
@@ -113,10 +112,7 @@ pub fn go_to_parent_module(
                     project.request_lsp(
                         buffer,
                         project::LanguageServerToQuery::Other(server_to_query),
-                        project::lsp_store::lsp_ext_command::GoToParentModule {
-                            position,
-                            server_id: server_to_query,
-                        },
+                        project::lsp_store::lsp_ext_command::GoToParentModule { position },
                         cx,
                     )
                 })
@@ -173,7 +169,6 @@ pub fn expand_macro_recursively(
                 project_id,
                 buffer_id: buffer_id.to_proto(),
                 position: Some(serialize_anchor(&trigger_anchor)),
-                server_id: server_to_query.to_proto(),
             };
             let response = client
                 .request(request)
@@ -191,10 +186,7 @@ pub fn expand_macro_recursively(
                     project.request_lsp(
                         buffer,
                         project::LanguageServerToQuery::Other(server_to_query),
-                        ExpandMacro {
-                            position,
-                            server_id: server_to_query,
-                        },
+                        ExpandMacro { position },
                         cx,
                     )
                 })
@@ -266,7 +258,6 @@ pub fn open_docs(editor: &mut Editor, _: &OpenDocs, window: &mut Window, cx: &mu
                 project_id,
                 buffer_id: buffer_id.to_proto(),
                 position: Some(serialize_anchor(&trigger_anchor)),
-                server_id: server_to_query.to_proto(),
             };
             let response = client
                 .request(request)
@@ -284,10 +275,7 @@ pub fn open_docs(editor: &mut Editor, _: &OpenDocs, window: &mut Window, cx: &mu
                     project.request_lsp(
                         buffer,
                         project::LanguageServerToQuery::Other(server_to_query),
-                        project::lsp_store::lsp_ext_command::OpenDocs {
-                            position,
-                            server_id: server_to_query,
-                        },
+                        project::lsp_store::lsp_ext_command::OpenDocs { position },
                         cx,
                     )
                 })

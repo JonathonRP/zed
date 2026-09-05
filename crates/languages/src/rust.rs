@@ -326,10 +326,7 @@ impl LspAdapter for RustLspAdapter {
                 .iter_mut()
                 .flatten()
                 .map(|info| &mut info.message)
-                .chain(match &mut diagnostic.message {
-                    lsp::DiagnosticMessage::String(message) => Some(message),
-                    lsp::DiagnosticMessage::MarkupContent(_) => None,
-                })
+                .chain([&mut diagnostic.message])
             {
                 if let Cow::Owned(sanitized) = REGEX.replace_all(message, "`$1`") {
                     *message = sanitized;
@@ -1484,75 +1481,42 @@ mod tests {
 
     #[gpui::test]
     async fn test_process_rust_diagnostics() {
-        let markdown_message = lsp::MarkupContent {
-            kind: lsp::MarkupKind::Markdown,
-            value: "consider importing this struct: `use b::c;\n`".to_string(),
-        };
-        let plain_text_message = lsp::MarkupContent {
-            kind: lsp::MarkupKind::PlainText,
-            value: "consider importing this struct: `use b::c;\n`".to_string(),
-        };
         let mut params = lsp::PublishDiagnosticsParams {
             uri: lsp::Uri::from_file_path(path!("/a")).unwrap(),
             version: None,
             diagnostics: vec![
                 // no newlines
                 lsp::Diagnostic {
-                    message: lsp::DiagnosticMessage::from("use of moved value `a`"),
+                    message: "use of moved value `a`".to_string(),
                     ..Default::default()
                 },
                 // newline at the end of a code span
                 lsp::Diagnostic {
-                    message: lsp::DiagnosticMessage::from(
-                        "consider importing this struct: `use b::c;\n`",
-                    ),
+                    message: "consider importing this struct: `use b::c;\n`".to_string(),
                     ..Default::default()
                 },
                 // code span starting right after a newline
                 lsp::Diagnostic {
-                    message: lsp::DiagnosticMessage::from(
-                        "cannot borrow `self.d` as mutable\n`self` is a `&` reference".to_string(),
-                    ),
-                    ..Default::default()
-                },
-                lsp::Diagnostic {
-                    message: lsp::DiagnosticMessage::from(markdown_message.clone()),
-                    ..Default::default()
-                },
-                lsp::Diagnostic {
-                    message: lsp::DiagnosticMessage::from(plain_text_message.clone()),
+                    message: "cannot borrow `self.d` as mutable\n`self` is a `&` reference"
+                        .to_string(),
                     ..Default::default()
                 },
             ],
         };
         RustLspAdapter.process_diagnostics(&mut params, LanguageServerId(0));
 
-        assert_eq!(
-            params.diagnostics[0].message,
-            lsp::DiagnosticMessage::from("use of moved value `a`")
-        );
+        assert_eq!(params.diagnostics[0].message, "use of moved value `a`");
 
         // remove trailing newline from code span
         assert_eq!(
             params.diagnostics[1].message,
-            lsp::DiagnosticMessage::from("consider importing this struct: `use b::c;`")
+            "consider importing this struct: `use b::c;`"
         );
 
         // do not remove newline before the start of code span
         assert_eq!(
             params.diagnostics[2].message,
-            lsp::DiagnosticMessage::from(
-                "cannot borrow `self.d` as mutable\n`self` is a `&` reference"
-            )
-        );
-
-        assert_eq!(
-            params.diagnostics[3].message,
-            lsp::DiagnosticMessage::from(markdown_message)
-        );
-        assert_eq!(
-            params.diagnostics[4].message,
-            lsp::DiagnosticMessage::from(plain_text_message)
+            "cannot borrow `self.d` as mutable\n`self` is a `&` reference"
         );
     }
 

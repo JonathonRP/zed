@@ -376,9 +376,6 @@ impl Server {
             .add_request_handler(forward_read_only_project_request::<proto::OpenUnstagedDiff>)
             .add_request_handler(forward_read_only_project_request::<proto::OpenUncommittedDiff>)
             .add_request_handler(forward_read_only_project_request::<proto::LspExtExpandMacro>)
-            .add_request_handler(
-                forward_read_only_project_request::<proto::LspExtExpandAbbreviation>,
-            )
             .add_request_handler(forward_read_only_project_request::<proto::LspExtOpenDocs>)
             .add_request_handler(forward_mutating_project_request::<proto::LspExtRunnables>)
             .add_request_handler(
@@ -491,7 +488,6 @@ impl Server {
             .add_request_handler(forward_mutating_project_request::<proto::Commit>)
             .add_request_handler(forward_mutating_project_request::<proto::RunGitHook>)
             .add_request_handler(forward_mutating_project_request::<proto::GitInit>)
-            .add_request_handler(forward_read_only_project_request::<proto::GetFilePermalink>)
             .add_request_handler(forward_read_only_project_request::<proto::GetRemotes>)
             .add_request_handler(forward_read_only_project_request::<proto::GitShow>)
             .add_request_handler(forward_read_only_project_request::<proto::LoadCommitDiff>)
@@ -660,7 +656,7 @@ impl Server {
                                             peer.send(
                                                 contact_conn_id,
                                                 proto::UpdateContacts {
-                                                    contacts: vec![updated_contact],
+                                                    contacts: vec![updated_contact.clone()],
                                                     remove_contacts: Default::default(),
                                                     incoming_requests: Default::default(),
                                                     remove_incoming_requests: Default::default(),
@@ -1949,7 +1945,7 @@ async fn unshare_project_internal(
         broadcast(
             Some(connection_id),
             guest_connection_ids.iter().copied(),
-            |conn_id| session.peer.send(conn_id, message),
+            |conn_id| session.peer.send(conn_id, message.clone()),
         );
         if let Some(room) = room {
             room_updated(room, &session.peer);
@@ -2263,7 +2259,7 @@ async fn remove_repository(
         |connection_id| {
             session
                 .peer
-                .forward_send(session.connection_id, connection_id, request)
+                .forward_send(session.connection_id, connection_id, request.clone())
         },
     );
     response.send(proto::Ack {})?;
@@ -4041,7 +4037,7 @@ async fn update_user_contacts(user_id: UserId, session: &Session) -> Result<()> 
                     .send(
                         contact_conn_id,
                         proto::UpdateContacts {
-                            contacts: vec![updated_contact],
+                            contacts: vec![updated_contact.clone()],
                             remove_contacts: Default::default(),
                             incoming_requests: Default::default(),
                             remove_incoming_requests: Default::default(),

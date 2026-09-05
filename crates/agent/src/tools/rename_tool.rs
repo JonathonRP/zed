@@ -81,7 +81,6 @@ impl AgentTool for RenameTool {
                     resolved.buffer.clone(),
                     resolved.position,
                     input.new_name.clone(),
-                    None,
                     cx,
                 )
             });
