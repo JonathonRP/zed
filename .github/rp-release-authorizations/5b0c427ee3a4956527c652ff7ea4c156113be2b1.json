@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "repository": "JonathonRP/zed",
+  "release_merge_sha": "5b0c427ee3a4956527c652ff7ea4c156113be2b1",
+  "pull_request": {
+    "number": 15,
+    "head_sha": "407ca4bc4ff66ee6f406d2e70fa8ce5976523c22"
+  },
+  "ordinary_compatibility": {
+    "workflow_path": ".github/workflows/rp_stable_sync.yml",
+    "workflow_blob_sha": "dbdb85382fa5a8a529313ca6c4d49e6eb5fec0f5",
+    "job_name": "Validate RP stable compatibility",
+    "run_id": 33908384435,
+    "job_id": 101138690327
+  },
+  "copied_profile_attestation": {
+    "attested_by": "JonathonRP",
+    "result": "passed",
+    "scope": [
+      "copied_profile_runtime",
+      "wsl_remote_server_compatibility"
+    ],
+    "control_ref": "refs/heads/automation/rp-control",
+    "control_sha": "f5a6fdb96b042777a8d08d70c3ef7a3d04edfc1a",
+    "workflow_path": ".github/workflows/rp_profile_compatibility_build.yml",
+    "workflow_blob_sha": "0d2da4ee29fd3262a197503d5a69185cea8b93db",
+    "run_id": 33909407320,
+    "jobs": [
+      {
+        "id": 101142073860,
+        "name": "Verify source and generate RP metadata"
+      },
+      {
+        "id": 101142302894,
+        "name": "Build unsigned Windows x86_64 client"
+      },
+      {
+        "id": 101142302962,
+        "name": "Build Linux x86_64 remote server"
+      }
+    ],
+    "artifacts": [
+      {
+        "id": 9950776712,
+        "name": "rp-profile-compatibility-metadata-407ca4bc4ff66ee6f406d2e70fa8ce5976523c22",
+        "size_in_bytes": 1057,
+        "digest": "sha256:b84f570d949c0afebb73e4857377a6cf86cdf73ddb58e6ec0b23a8ca013f2445"
+      },
+      {
+        "id": 9951766595,
+        "name": "rp-profile-compatibility-linux-x86_64-407ca4bc4ff66ee6f406d2e70fa8ce5976523c22",
+        "size_in_bytes": 145375887,
+        "digest": "sha256:c594ebe5e0639a506ab61043e43a66ea35785cb6be87886fba1f7b2406628125"
+      },
+      {
+        "id": 9957213068,
+        "name": "rp-profile-compatibility-windows-x86_64-407ca4bc4ff66ee6f406d2e70fa8ce5976523c22",
+        "size_in_bytes": 393253971,
+        "digest": "sha256:44e332a007162fc7412dae7f85a29d1cfa16106475b5439e15174e194b6a45cb"
+      }
+    ],
+    "metadata": {
+      "artifact_id": 9950776712,
+      "manifest_file": "rp-release-manifest.json",
+      "manifest_sha256": "c4fa662d38c2dce7d74950e56bbce8aad2ef91c29ca7bf25b0f1c2719bc2cee7",
+      "release_notes_file": "release-notes.md",
+      "release_notes_sha256": "a6183292ab2356139c8332e0db58e8bad20933f9929b90659f7e81be1420fb0f",
+      "source_sha": "407ca4bc4ff66ee6f406d2e70fa8ce5976523c22",
+      "upstream_tag": "v1.18.0",
+      "upstream_tag_commit": "49448afcab82f219b0ef4c58471cf81d23412475",
+      "upstream_version": "1.18.0"
+    }
+  }
+}
