@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "repository": "JonathonRP/zed",
+  "workflow_path": ".github/workflows/rp_stable_sync.yml",
+  "previous_workflow_blob_sha": "dbdb85382fa5a8a529313ca6c4d49e6eb5fec0f5",
+  "promoted_workflow_blob_sha": "a3423fbb7d1e7aeaaff6be5ecc26d97cc6f8e181",
+  "release_transition": {
+    "previous_tip": "fb8f0d5fae8c8e800e627cc5127500ae33ba692d",
+    "merge_sha": "b92faf43e29a167c1b82c45c578f0c259ea146c4",
+    "head_sha": "50e987863da13c0982df225027314ce3de40b20a"
+  },
+  "reviewed_control": {
+    "ref": "refs/heads/automation/rp-control",
+    "workflow_path": ".github/workflows/rp_stable_sync.yml",
+    "previous_workflow_blob_sha": "dbdb85382fa5a8a529313ca6c4d49e6eb5fec0f5",
+    "promoted_workflow_blob_sha": "a3423fbb7d1e7aeaaff6be5ecc26d97cc6f8e181",
+    "control_workflow_blob_sha": "4c3da74f1e2121a100682a7b391849135e06d1b2",
+    "reviewed_tip": "03df71a45065de0eddb14c71d2de0ae9554a2450",
+    "pull_requests": [
+      {
+        "number": 22,
+        "head_sha": "16c0fc0b656fe298090791dc091e0cc9c8698622",
+        "merge_sha": "8d082209d4aba8c44fd6b740f58391078ba45b94"
+      },
+      {
+        "number": 24,
+        "head_sha": "88e4f7baa7e5b8f40b5f85e20ff6617a9dd7e86d",
+        "merge_sha": "03df71a45065de0eddb14c71d2de0ae9554a2450"
+      }
+    ]
+  }
+}
