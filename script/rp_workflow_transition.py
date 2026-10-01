@@ -122,6 +122,7 @@ def validate_transition_record(record: Any) -> dict[str, Any]:
             "workflow_path",
             "previous_workflow_blob_sha",
             "promoted_workflow_blob_sha",
+            "control_workflow_blob_sha",
             "reviewed_tip",
             "pull_requests",
         },
@@ -138,14 +139,22 @@ def validate_transition_record(record: Any) -> dict[str, Any]:
         reviewed["previous_workflow_blob_sha"],
         "reviewed control previous workflow blob",
     )
-    require_sha(
+    control_promoted_blob = require_sha(
         reviewed["promoted_workflow_blob_sha"],
-        "reviewed control promoted workflow blob",
+        "reviewed release promoted workflow blob",
+    )
+    require_sha(
+        reviewed["control_workflow_blob_sha"],
+        "reviewed control workflow blob",
     )
     require_sha(reviewed["reviewed_tip"], "reviewed control tip")
     if control_previous_blob != previous_blob:
         raise WorkflowTransitionError(
             "release and control previous workflow blobs differ"
+        )
+    if control_promoted_blob != promoted_blob:
+        raise WorkflowTransitionError(
+            "release and reviewed promoted workflow blobs differ"
         )
     pulls = reviewed["pull_requests"]
     if not isinstance(pulls, list) or not pulls:
@@ -232,7 +241,7 @@ def validate_reviewed_control_topology(
     record = validate_transition_record(record)
     reviewed = record["reviewed_control"]
     workflow_path = reviewed["workflow_path"]
-    promoted_blob = reviewed["promoted_workflow_blob_sha"]
+    promoted_blob = reviewed["control_workflow_blob_sha"]
     previous_merge: str | None = None
     for index, pull in enumerate(reviewed["pull_requests"]):
         merge_sha = pull["merge_sha"]

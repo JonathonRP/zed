@@ -47,6 +47,7 @@ def control_chain_record(
     first_workflow: str,
     second_workflow: str,
     expected_promoted_blob: str | None = None,
+    expected_control_blob: str | None = None,
 ) -> dict[str, object]:
     initialize_repo(repo)
     workflow = repo / ".github/workflows/rp_stable_sync.yml"
@@ -88,6 +89,7 @@ def control_chain_record(
     )
     second_merge = git(repo, "rev-parse", "HEAD")
     promoted_blob = expected_promoted_blob or actual_promoted_blob
+    control_blob = expected_control_blob or actual_promoted_blob
     return {
         "schema_version": 1,
         "repository": "JonathonRP/zed",
@@ -104,6 +106,7 @@ def control_chain_record(
             "workflow_path": ".github/workflows/rp_stable_sync.yml",
             "previous_workflow_blob_sha": old_blob,
             "promoted_workflow_blob_sha": promoted_blob,
+            "control_workflow_blob_sha": control_blob,
             "reviewed_tip": second_merge,
             "pull_requests": [
                 {
@@ -151,6 +154,7 @@ class WorkflowTransitionTests(unittest.TestCase):
         repo = pathlib.Path(__file__).resolve().parents[1]
         transition = load_transition(repo / TRANSITION_PATH)
         transition["promoted_workflow_blob_sha"] = "0" * 40
+        transition["reviewed_control"]["promoted_workflow_blob_sha"] = "0" * 40
 
         with self.assertRaisesRegex(
             WorkflowTransitionError, "promoted workflow blob changed"
@@ -182,7 +186,7 @@ class WorkflowTransitionTests(unittest.TestCase):
     def test_unrelated_sequential_control_prs_are_rejected(self):
         repo = pathlib.Path(__file__).resolve().parents[1]
         transition = load_transition(repo / TRANSITION_PATH)
-        transition["reviewed_control"]["promoted_workflow_blob_sha"] = (
+        transition["reviewed_control"]["control_workflow_blob_sha"] = (
             transition["reviewed_control"]["previous_workflow_blob_sha"]
         )
 
@@ -200,7 +204,8 @@ class WorkflowTransitionTests(unittest.TestCase):
                 repo,
                 "old\n",
                 "old\n",
-                expected_promoted_blob="1" * 40,
+                expected_promoted_blob="2" * 40,
+                expected_control_blob="1" * 40,
             )
 
             with self.assertRaisesRegex(
@@ -234,6 +239,17 @@ class WorkflowTransitionTests(unittest.TestCase):
                 transition,
                 "f5a6fdb96b042777a8d08d70c3ef7a3d04edfc1a",
             )
+
+    def test_release_and_reviewed_promoted_blobs_must_match(self):
+        repo = pathlib.Path(__file__).resolve().parents[1]
+        transition = load_transition(repo / TRANSITION_PATH)
+        transition["reviewed_control"]["promoted_workflow_blob_sha"] = "1" * 40
+
+        with self.assertRaisesRegex(
+            WorkflowTransitionError,
+            "release and reviewed promoted workflow blobs differ",
+        ):
+            validate_transition_record(transition)
 
     def test_record_rejects_extra_fields_and_duplicate_reviews(self):
         repo = pathlib.Path(__file__).resolve().parents[1]
@@ -297,6 +313,11 @@ class WorkflowTransitionTests(unittest.TestCase):
                         f"{old_tip}:.github/workflows/rp_stable_sync.yml",
                     ),
                     "promoted_workflow_blob_sha": git(
+                        repo,
+                        "rev-parse",
+                        f"{head}:.github/workflows/rp_stable_sync.yml",
+                    ),
+                    "control_workflow_blob_sha": git(
                         repo,
                         "rev-parse",
                         f"{head}:.github/workflows/rp_stable_sync.yml",
