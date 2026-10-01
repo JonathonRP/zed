@@ -38,7 +38,8 @@ class Handoff:
 
 PORT_REQUEST_PATH = ".github/rp-stable-port-request.json"
 PORT_REQUEST_MARKER_PATTERN = re.compile(
-    r"^<!-- rp-stable-port-request: (\{.*\}) -->$", re.MULTILINE
+    r"^<!-- rp-stable-port-request: (\{[^\r\n]*\}) -->\r?$",
+    re.MULTILINE,
 )
 
 
