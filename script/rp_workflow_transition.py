@@ -53,6 +53,24 @@ def git(repo: pathlib.Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+def is_ancestor(repo: pathlib.Path, ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=repo,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    detail = result.stderr.decode(errors="replace").strip()
+    raise WorkflowTransitionError(
+        f"could not compare control history: {detail}"
+    )
+
+
 def load_transition(path: pathlib.Path) -> dict[str, Any]:
     record = json.loads(path.read_text(encoding="utf-8"))
     return validate_transition_record(record)
@@ -99,11 +117,36 @@ def validate_transition_record(record: Any) -> dict[str, Any]:
 
     reviewed = require_keys(
         record["reviewed_control"],
-        {"ref", "pull_requests"},
+        {
+            "ref",
+            "workflow_path",
+            "previous_workflow_blob_sha",
+            "promoted_workflow_blob_sha",
+            "reviewed_tip",
+            "pull_requests",
+        },
         "reviewed control identity",
     )
-    if reviewed["ref"] != CONTROL_REF:
-        raise WorkflowTransitionError("reviewed control ref is invalid")
+    if (
+        reviewed["ref"] != CONTROL_REF
+        or reviewed["workflow_path"] != ORDINARY_WORKFLOW
+    ):
+        raise WorkflowTransitionError(
+            "reviewed control ref or workflow path is invalid"
+        )
+    control_previous_blob = require_sha(
+        reviewed["previous_workflow_blob_sha"],
+        "reviewed control previous workflow blob",
+    )
+    require_sha(
+        reviewed["promoted_workflow_blob_sha"],
+        "reviewed control promoted workflow blob",
+    )
+    require_sha(reviewed["reviewed_tip"], "reviewed control tip")
+    if control_previous_blob != previous_blob:
+        raise WorkflowTransitionError(
+            "release and control previous workflow blobs differ"
+        )
     pulls = reviewed["pull_requests"]
     if not isinstance(pulls, list) or not pulls:
         raise WorkflowTransitionError(
@@ -182,11 +225,16 @@ def validate_transition_topology(
 
 
 def validate_reviewed_control_topology(
-    repo: pathlib.Path, record: dict[str, Any]
+    repo: pathlib.Path,
+    record: dict[str, Any],
+    resolved_control_ref: str,
 ) -> None:
     record = validate_transition_record(record)
+    reviewed = record["reviewed_control"]
+    workflow_path = reviewed["workflow_path"]
+    promoted_blob = reviewed["promoted_workflow_blob_sha"]
     previous_merge: str | None = None
-    for pull in record["reviewed_control"]["pull_requests"]:
+    for index, pull in enumerate(reviewed["pull_requests"]):
         merge_sha = pull["merge_sha"]
         parents = git(
             repo, "rev-list", "--parents", "-n", "1", merge_sha
@@ -203,4 +251,32 @@ def validate_reviewed_control_topology(
             raise WorkflowTransitionError(
                 "reviewed control pull requests are not sequential"
             )
+        if index == 0:
+            base_blob = git(
+                repo, "rev-parse", f"{parents[1]}:{workflow_path}"
+            )
+            if base_blob != reviewed["previous_workflow_blob_sha"]:
+                raise WorkflowTransitionError(
+                    "reviewed control transition previous workflow blob changed"
+                )
+        head_blob = git(
+            repo, "rev-parse", f"{pull['head_sha']}:{workflow_path}"
+        )
+        merge_blob = git(repo, "rev-parse", f"{merge_sha}:{workflow_path}")
+        if head_blob != promoted_blob or merge_blob != promoted_blob:
+            raise WorkflowTransitionError(
+                f"reviewed control PR #{pull['number']} did not retain "
+                "the promoted workflow blob"
+            )
         previous_merge = merge_sha
+    if previous_merge != reviewed["reviewed_tip"]:
+        raise WorkflowTransitionError(
+            "reviewed control tip does not match the final reviewed merge"
+        )
+    live_tip = git(
+        repo, "rev-parse", f"{resolved_control_ref}^{{commit}}"
+    )
+    if not is_ancestor(repo, reviewed["reviewed_tip"], live_tip):
+        raise WorkflowTransitionError(
+            "reviewed control tip is not contained in the live control ref"
+        )

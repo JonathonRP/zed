@@ -11,6 +11,10 @@
   },
   "reviewed_control": {
     "ref": "refs/heads/automation/rp-control",
+    "workflow_path": ".github/workflows/rp_stable_sync.yml",
+    "previous_workflow_blob_sha": "dbdb85382fa5a8a529313ca6c4d49e6eb5fec0f5",
+    "promoted_workflow_blob_sha": "4c3da74f1e2121a100682a7b391849135e06d1b2",
+    "reviewed_tip": "03df71a45065de0eddb14c71d2de0ae9554a2450",
     "pull_requests": [
       {
         "number": 22,
