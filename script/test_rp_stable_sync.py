@@ -150,6 +150,9 @@ class StableSyncTests(unittest.TestCase):
         self.assertIn("`shared.txt`", body)
         self.assertIn("https://example.invalid/run/1", body)
         self.assertIn(".github/rp-stable-port-request.json", body)
+        self.assertIn("# Objective", body)
+        self.assertIn("## Self-Review Checklist:", body)
+        self.assertIn("Release Notes:", body)
 
     def test_invalid_port_report_is_rejected(self):
         with self.assertRaisesRegex(StableSyncError, "conflicted paths"):

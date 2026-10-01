@@ -218,7 +218,12 @@ def manual_port_body(report: dict[str, object], run_url: str) -> str:
     failed_commit = report_string(rebase, "failed_commit")
     failed_subject = report_string(rebase, "failed_subject")
     path_lines = "\n".join(f"- `{path}`" for path in paths)
-    return f"""The guarded RP stable sync found patch drift that requires a manual port.
+    return f"""# Objective
+
+- Port the reviewed RP stable release line from `{old_tag}` to `{new_tag}`.
+- Resolve the patch drift recorded by the guarded stable-sync workflow.
+
+## Solution
 
 | | Current | Target |
 |---|---|---|
@@ -240,6 +245,31 @@ port-request commit with a reviewed manual port, remove
 `.github/rp-stable-port-request.json`, and let the existing provenance and
 compatibility checks run. Nothing in this workflow auto-merges or publishes a
 release.
+
+## Testing
+
+- [ ] Resolve the recorded conflicts without dropping upstream or RP behavior.
+- [ ] Run `python3 script/rp_stable_base.py verify --previous-ref HEAD^1`.
+- [ ] Run `python3 -m unittest discover -s script -p 'test_rp*.py'`.
+- [ ] Run focused ACP, updater, extension, editor, remote, and release tests.
+
+## Self-Review Checklist:
+
+- [ ] I've reviewed my own diff for quality, security, and reliability
+- [ ] Unsafe blocks (if any) have justifying comments
+- [ ] The content adheres to Zed's UI standards ([UX/UI](https://github.com/zed-industries/zed/blob/main/CONTRIBUTING.md#uiux-checklist) and [icon](https://github.com/zed-industries/zed/blob/main/crates/icons/README.md) guidelines)
+- [ ] Tests cover the new/changed behavior
+- [ ] Performance impact has been considered and is acceptable
+
+## Showcase
+
+- N/A; this is a source and release-automation port.
+
+---
+
+Release Notes:
+
+- N/A until the reviewed port is complete.
 """
 
 
