@@ -10,6 +10,9 @@ from rp_stable_sync import (
     attempt_rebase,
     classify_handoff,
     manual_port_body,
+    parse_port_request_marker,
+    port_request_identity,
+    port_request_marker,
 )
 
 
@@ -229,6 +232,56 @@ class StableSyncTests(unittest.TestCase):
                 },
                 "https://example.invalid/run/1",
             )
+
+    def test_port_request_marker_accepts_lf_and_crlf(self):
+        release_tip, candidate = self.make_handoff_commits()
+        report = self.handoff_report(release_tip, candidate)
+        marker = port_request_marker(report)
+        expected = port_request_identity(report)
+
+        self.assertEqual(
+            parse_port_request_marker(f"{marker}\n\n# Manual port\n"),
+            expected,
+        )
+        self.assertEqual(
+            parse_port_request_marker(f"{marker}\r\n\r\n# Manual port\r\n"),
+            expected,
+        )
+
+    def test_port_request_marker_rejects_multiple_markers(self):
+        release_tip, candidate = self.make_handoff_commits()
+        marker = port_request_marker(
+            self.handoff_report(release_tip, candidate)
+        )
+
+        with self.assertRaisesRegex(StableSyncError, "exactly one"):
+            parse_port_request_marker(f"{marker}\n{marker}\n")
+
+    def test_port_request_marker_rejects_malformed_identity(self):
+        with self.assertRaisesRegex(
+            StableSyncError, "invalid request identity"
+        ):
+            parse_port_request_marker(
+                "<!-- rp-stable-port-request: {not json} -->"
+            )
+
+    def test_port_request_marker_rejects_near_matches_and_trailing_junk(self):
+        release_tip, candidate = self.make_handoff_commits()
+        marker = port_request_marker(
+            self.handoff_report(release_tip, candidate)
+        )
+
+        for body in (
+            f" {marker}\n",
+            f"{marker} trailing junk\n",
+            f"prefix {marker}\n",
+            marker.replace("rp-stable-port-request", "rp-stable-port-requests"),
+            marker.replace(" -->", " extra -->"),
+            "<!-- rp-stable-port-request: [] -->",
+        ):
+            with self.subTest(body=body):
+                with self.assertRaisesRegex(StableSyncError, "exactly one"):
+                    parse_port_request_marker(body)
 
     def test_prepositioned_unrelated_handoff_branch_is_rejected(self):
         release_tip, candidate = self.make_handoff_commits()
