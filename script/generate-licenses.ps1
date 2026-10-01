@@ -29,7 +29,7 @@ try {
 
 if ($needsInstall) {
     Write-Host "Installing cargo-about@$CARGO_ABOUT_VERSION..."
-    cargo install "cargo-about@$CARGO_ABOUT_VERSION"
+    cargo install --locked "cargo-about@$CARGO_ABOUT_VERSION"
 }
 
 Write-Host "Generating cargo licenses"

@@ -43,7 +43,19 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 /// The app identifier for the current release channel, Windows only.
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
-    match *RELEASE_CHANNEL {
+    app_identifier_for(*RELEASE_CHANNEL, rp_release_metadata().is_some())
+}
+
+#[cfg(any(target_os = "windows", test))]
+const RP_APP_IDENTIFIER: &str = "Zed-ACP-Patched-RP-Stable";
+
+#[cfg(any(target_os = "windows", test))]
+fn app_identifier_for(release_channel: ReleaseChannel, has_rp_metadata: bool) -> &'static str {
+    if has_rp_metadata {
+        return RP_APP_IDENTIFIER;
+    }
+
+    match release_channel {
         ReleaseChannel::Dev => "Zed-Editor-Dev",
         ReleaseChannel::Nightly => "Zed-Editor-Nightly",
         ReleaseChannel::Preview => "Zed-Editor-Preview",
@@ -132,6 +144,93 @@ impl AppVersion {
             Version::new(0, 0, 0)
         }
     }
+}
+
+/// Additive release identity for RP fork builds.
+///
+/// These values are absent from ordinary Zed builds, whose version and update
+/// behavior remain unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RpReleaseMetadata {
+    /// Independent UTC calendar version in `YYYYMMDD.patch` form.
+    pub calendar_version: &'static str,
+    /// Git tag that identifies this release.
+    pub release_tag: &'static str,
+    /// Official upstream stable tag used as the RP source base.
+    pub upstream_tag: &'static str,
+    /// Full commit SHA pinned by the upstream stable tag.
+    pub upstream_tag_commit: &'static str,
+    /// Curated Markdown embedded in the packaged application.
+    pub release_notes: &'static str,
+    /// SHA-256 identity of `release_notes`.
+    pub notes_identity: &'static str,
+    /// Build-time release manifest as JSON.
+    pub manifest: &'static str,
+}
+
+/// Returns RP fork metadata when every compile-time value is present.
+pub fn rp_release_metadata() -> Option<RpReleaseMetadata> {
+    match (
+        option_env!("ZED_RP_RELEASE_VERSION"),
+        option_env!("ZED_RP_RELEASE_TAG"),
+        option_env!("ZED_RP_UPSTREAM_TAG"),
+        option_env!("ZED_RP_UPSTREAM_TAG_COMMIT"),
+        option_env!("ZED_RP_RELEASE_NOTES"),
+        option_env!("ZED_RP_RELEASE_NOTES_IDENTITY"),
+        option_env!("ZED_RP_RELEASE_MANIFEST"),
+    ) {
+        (
+            Some(calendar_version),
+            Some(release_tag),
+            Some(upstream_tag),
+            Some(upstream_tag_commit),
+            Some(release_notes),
+            Some(notes_identity),
+            Some(manifest),
+        ) => Some(RpReleaseMetadata {
+            calendar_version,
+            release_tag,
+            upstream_tag,
+            upstream_tag_commit,
+            release_notes,
+            notes_identity,
+            manifest,
+        }),
+        _ => None,
+    }
+}
+
+/// Formats the public release identity without prerelease or build metadata.
+pub fn release_display_identity(
+    rp_release: Option<RpReleaseMetadata>,
+    release_channel: ReleaseChannel,
+    version: &Version,
+) -> String {
+    let mut version = version.clone();
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    rp_release
+        .map(|release| {
+            format!(
+                "RP {} (Zed {} stable; {} @ {})",
+                release.calendar_version,
+                version,
+                release.upstream_tag,
+                release.upstream_tag_commit
+            )
+        })
+        .unwrap_or_else(|| format!("{} {}", release_channel.display_name(), version))
+}
+
+/// Formats the embedded RP release-notes tab title with both release identities.
+pub fn rp_release_notes_title(release: RpReleaseMetadata, version: &Version) -> String {
+    let mut version = version.clone();
+    version.pre = semver::Prerelease::EMPTY;
+    version.build = semver::BuildMetadata::EMPTY;
+    format!(
+        "RP {} (Zed {} stable) Release Notes",
+        release.calendar_version, version
+    )
 }
 
 /// A Zed release channel.
@@ -282,7 +381,56 @@ impl FromStr for ReleaseChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::ReleaseChannel;
+    use super::{
+        RP_APP_IDENTIFIER, ReleaseChannel, RpReleaseMetadata, app_identifier_for,
+        release_display_identity, rp_release_notes_title,
+    };
+    use semver::Version;
+
+    const RP_RELEASE: RpReleaseMetadata = RpReleaseMetadata {
+        calendar_version: "20260902.1",
+        release_tag: "rp-stable-20260902.1",
+        upstream_tag: "v1.17.2",
+        upstream_tag_commit: "0123456789abcdef0123456789abcdef01234567",
+        release_notes: "# Notes",
+        notes_identity: "sha256:notes",
+        manifest: "{}",
+    };
+
+    #[test]
+    fn rp_windows_identity_does_not_overlap_official_channels() {
+        for channel in ReleaseChannel::ALL {
+            let official_identifier = app_identifier_for(channel, false);
+            assert_ne!(RP_APP_IDENTIFIER, official_identifier);
+            assert_eq!(
+                app_identifier_for(channel, true),
+                RP_APP_IDENTIFIER,
+                "complete RP metadata must select the fork identity"
+            );
+        }
+    }
+
+    #[test]
+    fn release_titles_show_both_rp_and_upstream_identity() {
+        let version = Version::parse("1.17.2-preview.3+stable.sha").unwrap();
+        assert_eq!(
+            release_display_identity(Some(RP_RELEASE), ReleaseChannel::Stable, &version),
+            "RP 20260902.1 (Zed 1.17.2 stable; v1.17.2 @ 0123456789abcdef0123456789abcdef01234567)"
+        );
+        assert_eq!(
+            rp_release_notes_title(RP_RELEASE, &version),
+            "RP 20260902.1 (Zed 1.17.2 stable) Release Notes"
+        );
+    }
+
+    #[test]
+    fn official_release_identity_keeps_upstream_fallback() {
+        let version = Version::parse("1.17.2-preview.3+stable.sha").unwrap();
+        assert_eq!(
+            release_display_identity(None, ReleaseChannel::Preview, &version),
+            "Zed Preview 1.17.2"
+        );
+    }
 
     #[test]
     fn test_docs_url_for_release_channel() {

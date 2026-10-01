@@ -242,6 +242,16 @@ pub struct EditorSettingsContent {
     ///
     /// Default: [`DocumentColorsRenderMode::Inlay`]
     pub lsp_document_colors: Option<DocumentColorsRenderMode>,
+    /// Placement of LSP `textDocument/documentColor` inlay swatches.
+    /// This setting only applies when `lsp_document_colors` is set to `inlay`.
+    ///
+    /// Default: [`LspDocumentColorInlayPosition::Before`]
+    pub lsp_document_color_inlay_position: Option<LspDocumentColorInlayPosition>,
+    /// Shape of LSP `textDocument/documentColor` inlay swatches.
+    /// This setting only applies when `lsp_document_colors` is set to `inlay`.
+    ///
+    /// Default: [`LspDocumentColorInlayShape::Square`]
+    pub lsp_document_color_inlay_shape: Option<LspDocumentColorInlayShape>,
     /// Whether to query and display LSP `textDocument/documentLink` links in the editor.
     ///
     /// Default: true
@@ -622,6 +632,54 @@ pub enum DocumentColorsRenderMode {
     Border,
     /// Draw a background behind the color text.
     Background,
+}
+
+/// Placement of LSP `textDocument/documentColor` inlay swatches.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LspDocumentColorInlayPosition {
+    /// Render document color inlays before the color text.
+    #[default]
+    Before,
+    /// Render document color inlays after the color text.
+    After,
+}
+
+/// Shape of LSP `textDocument/documentColor` inlay swatches.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum LspDocumentColorInlayShape {
+    /// Render document color inlays as squares.
+    #[default]
+    Square,
+    /// Render document color inlays as circles.
+    Circle,
 }
 
 #[derive(
@@ -1231,5 +1289,44 @@ impl schemars::JsonSchema for CenteredPaddingSettings {
             "default": Self::DEFAULT_PADDING,
             "description": "Centered layout related setting (left/right)."
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EditorSettingsContent, LspDocumentColorInlayPosition, LspDocumentColorInlayShape};
+
+    #[test]
+    fn deserialize_lsp_document_color_inlay_position() -> serde_json::Result<()> {
+        assert_eq!(
+            LspDocumentColorInlayPosition::default(),
+            LspDocumentColorInlayPosition::Before
+        );
+
+        let settings: EditorSettingsContent =
+            serde_json::from_str(r#"{"lsp_document_color_inlay_position":"after"}"#)?;
+
+        assert_eq!(
+            settings.lsp_document_color_inlay_position,
+            Some(LspDocumentColorInlayPosition::After)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_lsp_document_color_inlay_shape() -> serde_json::Result<()> {
+        assert_eq!(
+            LspDocumentColorInlayShape::default(),
+            LspDocumentColorInlayShape::Square
+        );
+
+        let settings: EditorSettingsContent =
+            serde_json::from_str(r#"{"lsp_document_color_inlay_shape":"circle"}"#)?;
+
+        assert_eq!(
+            settings.lsp_document_color_inlay_shape,
+            Some(LspDocumentColorInlayShape::Circle)
+        );
+        Ok(())
     }
 }

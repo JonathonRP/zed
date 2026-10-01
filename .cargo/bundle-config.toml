@@ -6,3 +6,9 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 [target.aarch64-unknown-linux-musl]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[env]
+RUSTC_BOOTSTRAP = "1"
+
+[build]
+rustflags = ["-Z", "share-generics=y"]
