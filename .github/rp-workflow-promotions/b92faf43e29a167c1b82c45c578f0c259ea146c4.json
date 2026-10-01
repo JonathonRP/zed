@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "repository": "JonathonRP/zed",
+  "control_authorization": {
+    "ref": "refs/heads/automation/rp-control",
+    "commit_sha": "ede30afe7a74872426fa2c9ba206d587da900a4e",
+    "pull_request": {
+      "number": 25,
+      "head_sha": "ede30afe7a74872426fa2c9ba206d587da900a4e",
+      "merge_sha": "c94541bef53a5f30425f8e65da0b161aad421374"
+    }
+  },
+  "transition_manifest": {
+    "path": ".github/rp-workflow-transitions/a3423fbb7d1e7aeaaff6be5ecc26d97cc6f8e181.json",
+    "blob_sha": "4dc071b99c88cba3797261db58c910ffab76a107"
+  },
+  "transition_validator": {
+    "path": "script/rp_workflow_transition.py",
+    "blob_sha": "770583eca400e6b40818b9ef51b6ff310fa4b224"
+  },
+  "release_transition": {
+    "previous_tip": "fb8f0d5fae8c8e800e627cc5127500ae33ba692d",
+    "merge_sha": "b92faf43e29a167c1b82c45c578f0c259ea146c4",
+    "head_sha": "50e987863da13c0982df225027314ce3de40b20a",
+    "previous_workflow_blob_sha": "dbdb85382fa5a8a529313ca6c4d49e6eb5fec0f5",
+    "promoted_workflow_blob_sha": "a3423fbb7d1e7aeaaff6be5ecc26d97cc6f8e181"
+  }
+}
