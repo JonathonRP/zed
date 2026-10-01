@@ -14,6 +14,13 @@ import tempfile
 from typing import Any
 from urllib.parse import quote
 
+from rp_workflow_transition import (
+    WorkflowTransitionError,
+    validate_reviewed_control_topology,
+    validate_transition_record,
+    validate_transition_topology,
+)
+
 
 REPOSITORY = "JonathonRP/zed"
 OWNER = "JonathonRP"
@@ -23,6 +30,11 @@ ORDINARY_JOB = "Validate RP stable compatibility"
 PROFILE_WORKFLOW = ".github/workflows/rp_profile_compatibility_build.yml"
 PROFILE_CONTROL_REF = "refs/heads/automation/rp-control"
 AUTHORIZATION_DIRECTORY = pathlib.Path(".github/rp-release-authorizations")
+WORKFLOW_PROMOTION_DIRECTORY = pathlib.Path(".github/rp-workflow-promotions")
+TRANSITION_MANIFEST_DIRECTORY = pathlib.PurePosixPath(
+    ".github/rp-workflow-transitions"
+)
+TRANSITION_VALIDATOR_PATH = "script/rp_workflow_transition.py"
 INITIAL_WORKFLOW_RELEASE_SHA = "5b0c427ee3a4956527c652ff7ea4c156113be2b1"
 INITIAL_ORDINARY_WORKFLOW_BLOB_SHA = "dbdb85382fa5a8a529313ca6c4d49e6eb5fec0f5"
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
@@ -617,6 +629,406 @@ def validate_committed_records(control_root: pathlib.Path) -> None:
         validate_authorization_record(record, release_sha, head_sha)
 
 
+def validate_workflow_promotion_record(
+    record: Any, promotion_path: pathlib.Path | None = None
+) -> dict[str, Any]:
+    record = require_keys(
+        record,
+        {
+            "schema_version",
+            "repository",
+            "control_authorization",
+            "transition_manifest",
+            "transition_validator",
+            "release_transition",
+        },
+        "workflow promotion",
+    )
+    if record["schema_version"] != 1 or record["repository"] != REPOSITORY:
+        raise AuthorizationError("workflow promotion schema or repository is invalid")
+
+    control = require_keys(
+        record["control_authorization"],
+        {"ref", "commit_sha", "pull_request"},
+        "workflow promotion control authorization",
+    )
+    if control["ref"] != PROFILE_CONTROL_REF:
+        raise AuthorizationError("workflow promotion control ref is invalid")
+    authorization_sha = require_sha(
+        control["commit_sha"], "workflow promotion control commit"
+    )
+    authorization_pull = require_keys(
+        control["pull_request"],
+        {"number", "head_sha", "merge_sha"},
+        "workflow promotion control pull request",
+    )
+    require_positive_integer(
+        authorization_pull["number"], "workflow promotion control PR number"
+    )
+    if (
+        require_sha(
+            authorization_pull["head_sha"],
+            "workflow promotion control PR head",
+        )
+        != authorization_sha
+    ):
+        raise AuthorizationError(
+            "workflow promotion control commit must equal its PR head"
+        )
+    require_sha(
+        authorization_pull["merge_sha"],
+        "workflow promotion control PR merge",
+    )
+
+    release = require_keys(
+        record["release_transition"],
+        {
+            "previous_tip",
+            "merge_sha",
+            "head_sha",
+            "previous_workflow_blob_sha",
+            "promoted_workflow_blob_sha",
+        },
+        "workflow promotion release transition",
+    )
+    for key in (
+        "previous_tip",
+        "merge_sha",
+        "head_sha",
+        "previous_workflow_blob_sha",
+        "promoted_workflow_blob_sha",
+    ):
+        require_sha(release[key], f"workflow promotion {key}")
+    if (
+        release["previous_workflow_blob_sha"]
+        == release["promoted_workflow_blob_sha"]
+    ):
+        raise AuthorizationError("workflow promotion must change the workflow blob")
+    if promotion_path is not None and promotion_path.stem != release["merge_sha"]:
+        raise AuthorizationError(
+            "workflow promotion filename must equal its release merge SHA"
+        )
+
+    manifest = require_keys(
+        record["transition_manifest"],
+        {"path", "blob_sha"},
+        "workflow promotion transition manifest",
+    )
+    expected_manifest_path = str(
+        TRANSITION_MANIFEST_DIRECTORY
+        / f"{release['promoted_workflow_blob_sha']}.json"
+    )
+    if manifest["path"] != expected_manifest_path:
+        raise AuthorizationError("workflow promotion manifest path is invalid")
+    require_sha(manifest["blob_sha"], "workflow promotion manifest blob")
+
+    validator = require_keys(
+        record["transition_validator"],
+        {"path", "blob_sha"},
+        "workflow promotion transition validator",
+    )
+    if validator["path"] != TRANSITION_VALIDATOR_PATH:
+        raise AuthorizationError("workflow promotion validator path is invalid")
+    require_sha(validator["blob_sha"], "workflow promotion validator blob")
+    return record
+
+
+def load_workflow_promotions(control_root: pathlib.Path) -> list[dict[str, Any]]:
+    directory = control_root / WORKFLOW_PROMOTION_DIRECTORY
+    if not directory.is_dir():
+        raise AuthorizationError(f"missing workflow promotion directory {directory}")
+    paths = sorted(directory.iterdir())
+    if not paths:
+        raise AuthorizationError("workflow promotion directory is empty")
+    promotions = []
+    for path in paths:
+        if not path.is_file() or path.suffix != ".json":
+            raise AuthorizationError(f"unexpected workflow promotion entry {path}")
+        promotions.append(
+            validate_workflow_promotion_record(
+                json.loads(path.read_text(encoding="utf-8")), path
+            )
+        )
+    return promotions
+
+
+def release_workflow_transitions(
+    control_root: pathlib.Path, release_tip: str
+) -> list[dict[str, str]]:
+    history = git(
+        control_root,
+        "rev-list",
+        "--first-parent",
+        "--reverse",
+        f"{INITIAL_WORKFLOW_RELEASE_SHA}^..{release_tip}",
+    ).splitlines()
+    if not history or history[0] != INITIAL_WORKFLOW_RELEASE_SHA:
+        raise AuthorizationError(
+            "release history does not contain the audited initial workflow release"
+        )
+    previous_sha = history[0]
+    previous_blob = git(
+        control_root, "rev-parse", f"{previous_sha}:{ORDINARY_WORKFLOW}"
+    )
+    if previous_blob != INITIAL_ORDINARY_WORKFLOW_BLOB_SHA:
+        raise AuthorizationError("audited initial ordinary workflow blob changed")
+
+    transitions = []
+    for commit_sha in history[1:]:
+        current_blob = git(
+            control_root, "rev-parse", f"{commit_sha}:{ORDINARY_WORKFLOW}"
+        )
+        if current_blob != previous_blob:
+            parents = git(
+                control_root, "rev-list", "--parents", "-n", "1", commit_sha
+            ).split()
+            if (
+                len(parents) != 3
+                or parents[0] != commit_sha
+                or parents[1] != previous_sha
+            ):
+                raise AuthorizationError(
+                    "ordinary workflow changed outside a two-parent release merge"
+                )
+            transitions.append(
+                {
+                    "previous_tip": previous_sha,
+                    "merge_sha": commit_sha,
+                    "head_sha": parents[2],
+                    "previous_workflow_blob_sha": previous_blob,
+                    "promoted_workflow_blob_sha": current_blob,
+                }
+            )
+        previous_sha = commit_sha
+        previous_blob = current_blob
+    return transitions
+
+
+def require_ancestor(
+    control_root: pathlib.Path, ancestor: str, descendant: str, source: str
+) -> None:
+    try:
+        git(control_root, "merge-base", "--is-ancestor", ancestor, descendant)
+    except AuthorizationError as error:
+        raise AuthorizationError(
+            f"{source} {ancestor} is not reachable from {descendant}"
+        ) from error
+
+
+def validate_control_pull_request(
+    pull: Any,
+    *,
+    number: int,
+    head_sha: str,
+    merge_sha: str | None,
+) -> str:
+    if not isinstance(pull, dict):
+        raise AuthorizationError(f"control PR #{number} response is invalid")
+    base = pull.get("base") or {}
+    head = pull.get("head") or {}
+    actual_merge_sha = require_sha(
+        pull.get("merge_commit_sha"), f"control PR #{number} merge"
+    )
+    if (
+        pull.get("number") != number
+        or pull.get("merged_at") is None
+        or base.get("ref") != PROFILE_CONTROL_REF.removeprefix("refs/heads/")
+        or (base.get("repo") or {}).get("full_name") != REPOSITORY
+        or head.get("sha") != head_sha
+        or (head.get("repo") or {}).get("full_name") != REPOSITORY
+        or (merge_sha is not None and actual_merge_sha != merge_sha)
+    ):
+        raise AuthorizationError(f"control PR #{number} identity is not trusted")
+    return actual_merge_sha
+
+
+def validate_workflow_promotions(
+    control_root: pathlib.Path,
+    release_tip: str,
+    release_remote: str = "origin",
+) -> None:
+    promotions = load_workflow_promotions(control_root)
+    transitions = release_workflow_transitions(control_root, release_tip)
+
+    by_merge: dict[str, list[dict[str, Any]]] = {}
+    authorization_commits: set[str] = set()
+    manifest_blobs: set[str] = set()
+    transition_pairs: set[tuple[str, str]] = set()
+    for promotion in promotions:
+        release = promotion["release_transition"]
+        by_merge.setdefault(release["merge_sha"], []).append(promotion)
+        authorization_sha = promotion["control_authorization"]["commit_sha"]
+        manifest_blob = promotion["transition_manifest"]["blob_sha"]
+        transition_pair = (
+            release["previous_workflow_blob_sha"],
+            release["promoted_workflow_blob_sha"],
+        )
+        if (
+            authorization_sha in authorization_commits
+            or manifest_blob in manifest_blobs
+            or transition_pair in transition_pairs
+        ):
+            raise AuthorizationError("workflow promotion was duplicated or replayed")
+        authorization_commits.add(authorization_sha)
+        manifest_blobs.add(manifest_blob)
+        transition_pairs.add(transition_pair)
+
+    matched_promotions: list[dict[str, Any]] = []
+    for transition in transitions:
+        matches = by_merge.pop(transition["merge_sha"], [])
+        if len(matches) != 1 or matches[0]["release_transition"] != transition:
+            raise AuthorizationError(
+                "ordinary workflow transition does not have exactly one promotion"
+            )
+        matched_promotions.append(matches[0])
+    if by_merge:
+        raise AuthorizationError("workflow promotion targets an unrelated transition")
+    if not matched_promotions:
+        raise AuthorizationError(
+            "release history has no promoted ordinary workflow transition"
+        )
+
+    latest_validator = matched_promotions[-1]["transition_validator"]
+    tracked_validator_blob = git(
+        control_root,
+        "rev-parse",
+        f"{release_tip}:{latest_validator['path']}",
+    )
+    local_validator_blob = git(
+        control_root,
+        "hash-object",
+        latest_validator["path"],
+    )
+    if (
+        tracked_validator_blob != latest_validator["blob_sha"]
+        or local_validator_blob != latest_validator["blob_sha"]
+    ):
+        raise AuthorizationError(
+            "local workflow transition validator blob changed"
+        )
+
+    remote_ref = "refs/remotes/origin/rp-control-workflow-promotions"
+    git(
+        control_root,
+        "fetch",
+        "--force",
+        "--no-tags",
+        release_remote,
+        f"+{PROFILE_CONTROL_REF}:{remote_ref}",
+    )
+    live_control_sha = git(
+        control_root, "rev-parse", "--verify", f"{remote_ref}^{{commit}}"
+    )
+
+    for promotion in promotions:
+        control = promotion["control_authorization"]
+        authorization_sha = control["commit_sha"]
+        require_ancestor(
+            control_root,
+            authorization_sha,
+            live_control_sha,
+            "workflow promotion authorization commit",
+        )
+        authorization_pull = control["pull_request"]
+        authorization_merge_sha = validate_control_pull_request(
+            gh_json(
+                f"repos/{REPOSITORY}/pulls/{authorization_pull['number']}"
+            ),
+            number=authorization_pull["number"],
+            head_sha=authorization_pull["head_sha"],
+            merge_sha=authorization_pull["merge_sha"],
+        )
+        require_ancestor(
+            control_root,
+            authorization_merge_sha,
+            live_control_sha,
+            "workflow promotion authorization merge",
+        )
+
+        manifest_identity = promotion["transition_manifest"]
+        validator_identity = promotion["transition_validator"]
+        remote_manifest_blob = git(
+            control_root,
+            "rev-parse",
+            f"{authorization_sha}:{manifest_identity['path']}",
+        )
+        remote_validator_blob = git(
+            control_root,
+            "rev-parse",
+            f"{authorization_sha}:{validator_identity['path']}",
+        )
+        if remote_manifest_blob != manifest_identity["blob_sha"]:
+            raise AuthorizationError("workflow promotion manifest blob changed")
+        if remote_validator_blob != validator_identity["blob_sha"]:
+            raise AuthorizationError("workflow promotion validator blob changed")
+
+        remote_manifest = validate_transition_record(
+            json.loads(
+                git(
+                    control_root,
+                    "show",
+                    f"{authorization_sha}:{manifest_identity['path']}",
+                )
+            )
+        )
+        release = promotion["release_transition"]
+        if (
+            remote_manifest["repository"] != promotion["repository"]
+            or remote_manifest["workflow_path"] != ORDINARY_WORKFLOW
+            or remote_manifest["previous_workflow_blob_sha"]
+            != release["previous_workflow_blob_sha"]
+            or remote_manifest["promoted_workflow_blob_sha"]
+            != release["promoted_workflow_blob_sha"]
+            or remote_manifest["release_transition"]
+            != {
+                "previous_tip": release["previous_tip"],
+                "merge_sha": release["merge_sha"],
+                "head_sha": release["head_sha"],
+            }
+            or remote_manifest["reviewed_control"]["ref"] != control["ref"]
+        ):
+            raise AuthorizationError(
+                "workflow promotion does not match its remote transition manifest"
+            )
+        reviewed_remote_ref = (
+            "refs/remotes/origin/rp-reviewed-control-workflow-promotions"
+        )
+        reviewed_control_ref = remote_manifest["reviewed_control"]["ref"]
+        git(
+            control_root,
+            "fetch",
+            "--force",
+            "--no-tags",
+            release_remote,
+            f"+{reviewed_control_ref}:{reviewed_remote_ref}",
+        )
+        git(
+            control_root,
+            "rev-parse",
+            "--verify",
+            f"{reviewed_remote_ref}^{{commit}}",
+        )
+        validate_transition_topology(control_root, remote_manifest)
+        validate_reviewed_control_topology(
+            control_root, remote_manifest, reviewed_remote_ref
+        )
+        for reviewed_pull in remote_manifest["reviewed_control"]["pull_requests"]:
+            validate_control_pull_request(
+                gh_json(
+                    f"repos/{REPOSITORY}/pulls/{reviewed_pull['number']}"
+                ),
+                number=reviewed_pull["number"],
+                head_sha=reviewed_pull["head_sha"],
+                merge_sha=reviewed_pull["merge_sha"],
+            )
+            require_ancestor(
+                control_root,
+                reviewed_pull["merge_sha"],
+                authorization_sha,
+                f"reviewed control PR #{reviewed_pull['number']} merge",
+            )
+
+
 def write_results(
     path: pathlib.Path | None,
     values: dict[str, str | int],
@@ -704,6 +1116,11 @@ def main() -> int:
             args.control_root,
             args.control_sha,
             args.release_sha,
+            args.release_remote,
+        )
+        validate_workflow_promotions(
+            args.control_root,
+            args.control_sha,
             args.release_remote,
         )
         if args.event_name == "push":
@@ -816,7 +1233,13 @@ def main() -> int:
             ordinary_job_id=ordinary_job_id,
             profile=profile,
         )
-    except (AuthorizationError, json.JSONDecodeError, OSError, StopIteration) as error:
+    except (
+        AuthorizationError,
+        WorkflowTransitionError,
+        json.JSONDecodeError,
+        OSError,
+        StopIteration,
+    ) as error:
         print(f"RP release authorization failed: {error}", file=sys.stderr)
         return 1
     return 0
