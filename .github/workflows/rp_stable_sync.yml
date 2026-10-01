@@ -228,6 +228,7 @@ jobs:
       - name: Verify provenance and compatibility
         run: |
           set -euo pipefail
+          test ! -e .github/rp-stable-port-request.json
           tag="$(
             python3 -c 'import json; print(json.load(open(".github/rp-stable-base.json"))["upstream_tag"])'
           )"
