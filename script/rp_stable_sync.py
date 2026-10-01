@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -25,6 +26,20 @@ class RebaseRequest:
     new_tag: str
     new_sha: str
     new_version: str
+
+
+@dataclass(frozen=True)
+class Handoff:
+    state: str
+    pr_number: str = ""
+    pr_state: str = ""
+    pr_url: str = ""
+
+
+PORT_REQUEST_PATH = ".github/rp-stable-port-request.json"
+PORT_REQUEST_MARKER_PATTERN = re.compile(
+    r"^<!-- rp-stable-port-request: (\{.*\}) -->$", re.MULTILINE
+)
 
 
 def run_git(
@@ -200,6 +215,231 @@ def report_string(section: dict[str, object], key: str) -> str:
     return value
 
 
+def port_request_identity(report: dict[str, object]) -> dict[str, object]:
+    previous = report_mapping(report, "previous")
+    candidate = report_mapping(report, "candidate")
+    identity = {
+        "schema_version": report.get("schema_version"),
+        "base_branch": report.get("base_branch"),
+        "release_tip": report.get("release_tip"),
+        "previous": {
+            key: report_string(previous, key)
+            for key in ("tag", "commit", "version")
+        },
+        "candidate": {
+            key: report_string(candidate, key)
+            for key in ("tag", "commit", "version")
+        },
+    }
+    if identity["schema_version"] != 1:
+        raise StableSyncError("port request has an invalid schema version")
+    if not isinstance(identity["base_branch"], str) or not identity["base_branch"]:
+        raise StableSyncError("port request has an invalid base branch")
+    if not isinstance(identity["release_tip"], str) or not identity["release_tip"]:
+        raise StableSyncError("port request has an invalid release tip")
+    return identity
+
+
+def port_request_marker(report: dict[str, object]) -> str:
+    identity = json.dumps(
+        port_request_identity(report),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"<!-- rp-stable-port-request: {identity} -->"
+
+
+def parse_port_request_marker(body: object) -> dict[str, object]:
+    if not isinstance(body, str):
+        raise StableSyncError("manual-port PR has no request identity")
+    markers = PORT_REQUEST_MARKER_PATTERN.findall(body)
+    if len(markers) != 1:
+        raise StableSyncError(
+            "manual-port PR must contain exactly one request identity"
+        )
+    try:
+        marker = json.loads(markers[0])
+    except json.JSONDecodeError as error:
+        raise StableSyncError(
+            "manual-port PR has an invalid request identity"
+        ) from error
+    if not isinstance(marker, dict):
+        raise StableSyncError("manual-port PR has an invalid request identity")
+    return marker
+
+
+def read_report_at_ref(
+    repo: pathlib.Path, ref: str, path: str = PORT_REQUEST_PATH
+) -> dict[str, object] | None:
+    result = run_git(repo, "show", f"{ref}:{path}", check=False)
+    if result.returncode != 0:
+        return None
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise StableSyncError(
+            f"{ref} has an invalid {path}"
+        ) from error
+    if not isinstance(report, dict):
+        raise StableSyncError(f"{ref} has an invalid {path}")
+    return report
+
+
+def has_matching_marker_history(
+    repo: pathlib.Path,
+    ref: str,
+    expected_identity: dict[str, object],
+) -> bool:
+    commits = git_output(repo, "rev-list", ref, "--", PORT_REQUEST_PATH).splitlines()
+    for commit in commits:
+        report = read_report_at_ref(repo, commit)
+        if report is None:
+            continue
+        try:
+            identity = port_request_identity(report)
+        except StableSyncError:
+            continue
+        if identity == expected_identity:
+            return True
+    return False
+
+
+def validate_pr(
+    pr: dict[str, object],
+    expected_repository: str,
+    branch_name: str,
+    branch_tip: str,
+    base_branch: str,
+) -> None:
+    head = pr.get("head")
+    base = pr.get("base")
+    if (
+        not isinstance(pr.get("number"), int)
+        or pr["number"] < 1
+        or pr.get("state") not in ("open", "closed")
+        or not isinstance(pr.get("html_url"), str)
+        or not pr["html_url"]
+        or "merged_at" not in pr
+    ):
+        raise StableSyncError("manual-port PR metadata is invalid")
+    if not isinstance(head, dict) or not isinstance(base, dict):
+        raise StableSyncError("manual-port PR has invalid head or base metadata")
+    head_repo = head.get("repo")
+    base_repo = base.get("repo")
+    if not isinstance(head_repo, dict) or not isinstance(base_repo, dict):
+        raise StableSyncError("manual-port PR has invalid repository metadata")
+    if head_repo.get("full_name") != expected_repository:
+        raise StableSyncError("manual-port PR head repository is not trusted")
+    if base_repo.get("full_name") != expected_repository:
+        raise StableSyncError("manual-port PR base repository is not trusted")
+    if head.get("ref") != branch_name or head.get("sha") != branch_tip:
+        raise StableSyncError("manual-port PR head does not match the live branch")
+    if base.get("ref") != base_branch:
+        raise StableSyncError("manual-port PR targets an unexpected base")
+    if pr.get("merged_at") is not None:
+        raise StableSyncError(
+            "manual-port PR is merged while the verified release tip is unchanged"
+        )
+
+
+def classify_handoff(
+    repo: pathlib.Path,
+    branch_ref: str | None,
+    branch_name: str,
+    report: dict[str, object],
+    prs: list[object],
+    expected_repository: str,
+) -> Handoff:
+    expected_identity = port_request_identity(report)
+    base_branch = expected_identity["base_branch"]
+    release_tip = expected_identity["release_tip"]
+    candidate = report_mapping(report, "candidate")
+    candidate_commit = report_string(candidate, "commit")
+    if not isinstance(base_branch, str) or not isinstance(release_tip, str):
+        raise StableSyncError("port request identity is invalid")
+
+    if len(prs) > 1:
+        raise StableSyncError("multiple manual-port PRs use the deterministic branch")
+    if prs and not isinstance(prs[0], dict):
+        raise StableSyncError("manual-port PR metadata is invalid")
+
+    if branch_ref is None:
+        if prs:
+            raise StableSyncError("manual-port PR exists without its head branch")
+        return Handoff(state="missing")
+
+    branch_tip = git_output(repo, "rev-parse", f"{branch_ref}^{{commit}}")
+    pr = prs[0] if prs else None
+    if pr is not None:
+        validate_pr(
+            pr,
+            expected_repository,
+            branch_name,
+            branch_tip,
+            base_branch,
+        )
+
+    marker_report = read_report_at_ref(repo, branch_ref)
+    if marker_report is not None:
+        if marker_report.get("outcome") != "manual_port_required":
+            raise StableSyncError(
+                "generated manual-port branch has an invalid request marker"
+            )
+        if port_request_identity(marker_report) != expected_identity:
+            raise StableSyncError(
+                "generated manual-port branch has stale request identity"
+            )
+        parents = git_output(repo, "show", "-s", "--format=%P", branch_ref).split()
+        changed_paths = git_output(
+            repo, "diff", "--name-only", release_tip, branch_ref
+        ).splitlines()
+        if parents != [release_tip] or changed_paths != [PORT_REQUEST_PATH]:
+            raise StableSyncError(
+                "generated manual-port branch contains unrelated changes"
+            )
+        return Handoff(
+            state="generated_marker",
+            pr_number=str(pr.get("number", "")) if pr else "",
+            pr_state=str(pr.get("state", "")) if pr else "",
+            pr_url=str(pr.get("html_url", "")) if pr else "",
+        )
+
+    if pr is None:
+        raise StableSyncError(
+            "same-name manual-port branch has no durable request evidence"
+        )
+    if pr.get("state") != "open":
+        raise StableSyncError(
+            "human-progress manual-port PR is not open; refusing to modify it"
+        )
+    if parse_port_request_marker(pr.get("body")) != expected_identity:
+        raise StableSyncError("manual-port PR has stale request identity")
+
+    candidate_is_ancestor = (
+        run_git(
+            repo,
+            "merge-base",
+            "--is-ancestor",
+            candidate_commit,
+            branch_ref,
+            check=False,
+        ).returncode
+        == 0
+    )
+    if not candidate_is_ancestor and not has_matching_marker_history(
+        repo, branch_ref, expected_identity
+    ):
+        raise StableSyncError(
+            "human-progress branch is unrelated to the requested candidate"
+        )
+    return Handoff(
+        state="human_progress",
+        pr_number=str(pr.get("number", "")),
+        pr_state=str(pr.get("state", "")),
+        pr_url=str(pr.get("html_url", "")),
+    )
+
+
 def manual_port_body(report: dict[str, object], run_url: str) -> str:
     previous = report_mapping(report, "previous")
     candidate = report_mapping(report, "candidate")
@@ -218,7 +458,10 @@ def manual_port_body(report: dict[str, object], run_url: str) -> str:
     failed_commit = report_string(rebase, "failed_commit")
     failed_subject = report_string(rebase, "failed_subject")
     path_lines = "\n".join(f"- `{path}`" for path in paths)
-    return f"""# Objective
+    identity_marker = port_request_marker(report)
+    return f"""{identity_marker}
+
+# Objective
 
 - Port the reviewed RP stable release line from `{old_tag}` to `{new_tag}`.
 - Resolve the patch drift recorded by the guarded stable-sync workflow.
@@ -293,6 +536,15 @@ def parse_args() -> argparse.Namespace:
     render.add_argument("--report", type=pathlib.Path, required=True)
     render.add_argument("--run-url", required=True)
     render.add_argument("--output", type=pathlib.Path, required=True)
+
+    handoff = subparsers.add_parser("handoff")
+    handoff.add_argument("--repo", type=pathlib.Path, required=True)
+    handoff.add_argument("--branch-ref")
+    handoff.add_argument("--branch-name", required=True)
+    handoff.add_argument("--report", type=pathlib.Path, required=True)
+    handoff.add_argument("--prs", type=pathlib.Path, required=True)
+    handoff.add_argument("--expected-repository", required=True)
+    handoff.add_argument("--github-output", type=pathlib.Path, required=True)
     return parser.parse_args()
 
 
@@ -311,9 +563,30 @@ def main() -> int:
                 new_version=args.new_version,
             )
             attempt_rebase(request, args.report, args.github_output)
-        else:
+        elif args.command == "render":
             body = manual_port_body(read_report(args.report), args.run_url)
             args.output.write_text(body, encoding="utf-8", newline="\n")
+        else:
+            prs = json.loads(args.prs.read_text(encoding="utf-8"))
+            if not isinstance(prs, list):
+                raise StableSyncError("manual-port PR query did not return a list")
+            handoff = classify_handoff(
+                args.repo.resolve(),
+                args.branch_ref,
+                args.branch_name,
+                read_report(args.report),
+                prs,
+                args.expected_repository,
+            )
+            write_github_outputs(
+                args.github_output,
+                {
+                    "state": handoff.state,
+                    "pr_number": handoff.pr_number,
+                    "pr_state": handoff.pr_state,
+                    "pr_url": handoff.pr_url,
+                },
+            )
     except (OSError, json.JSONDecodeError, StableSyncError) as error:
         print(f"RP stable sync error: {error}", file=sys.stderr)
         return 1

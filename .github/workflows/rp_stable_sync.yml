@@ -254,32 +254,38 @@ jobs:
           )"
           test "$live_release_tip" = "$RELEASE_TIP"
 
-          pr_json="$(
-            gh pr list \
-              --repo "$GITHUB_REPOSITORY" \
-              --base release/rp-stable \
-              --head "$branch" \
-              --state all \
-              --json number,state,mergedAt,url \
-              --jq '.[0] // empty'
+          gh api --paginate --slurp \
+            "repos/${GITHUB_REPOSITORY}/pulls?state=all&per_page=100" |
+            jq --arg branch "$branch" \
+              '[.[][] | select(.head.ref == $branch)]' \
+              > "$RUNNER_TEMP/manual-port-prs.json"
+
+          remote_tip="$(
+            git ls-remote "$remote" "refs/heads/${branch}" | cut -f1
           )"
-          if [[ -n "$pr_json" ]]; then
-            pr="$(jq -r '.number' <<<"$pr_json")"
-            state="$(jq -r '.state' <<<"$pr_json")"
-            merged_at="$(jq -r '.mergedAt // empty' <<<"$pr_json")"
-            pr_url="$(jq -r '.url' <<<"$pr_json")"
-            if [[ -n "$merged_at" ]]; then
-              echo "Manual-port PR ${pr_url} is already merged, but the release base is unchanged." >&2
-              exit 1
-            fi
-            if [[ "$state" = "CLOSED" ]]; then
-              gh pr reopen "$pr" --repo "$GITHUB_REPOSITORY"
-            fi
-          else
-            remote_tip="$(
-              git ls-remote "$remote" "refs/heads/${branch}" | cut -f1
-            )"
-            if [[ -z "$remote_tip" ]]; then
+          handoff_args=(
+            handoff
+            --repo .
+            --branch-name "$branch"
+            --report "$RUNNER_TEMP/rebase-conflict.json"
+            --prs "$RUNNER_TEMP/manual-port-prs.json"
+            --expected-repository "$GITHUB_REPOSITORY"
+            --github-output "$RUNNER_TEMP/handoff-output"
+          )
+          if [[ -n "$remote_tip" ]]; then
+            git fetch --no-tags "$remote" \
+              "refs/heads/${branch}:refs/rp-stable-handoff/head"
+            handoff_args+=(--branch-ref refs/rp-stable-handoff/head)
+          fi
+          python3 "$GITHUB_WORKSPACE/control/script/rp_stable_sync.py" \
+            "${handoff_args[@]}"
+
+          handoff_state="$(sed -n 's/^state=//p' "$RUNNER_TEMP/handoff-output")"
+          pr="$(sed -n 's/^pr_number=//p' "$RUNNER_TEMP/handoff-output")"
+          pr_state="$(sed -n 's/^pr_state=//p' "$RUNNER_TEMP/handoff-output")"
+          pr_url="$(sed -n 's/^pr_url=//p' "$RUNNER_TEMP/handoff-output")"
+          case "$handoff_state" in
+            missing)
               git config user.name "github-actions[bot]"
               git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
               cp "$RUNNER_TEMP/rebase-conflict.json" \
@@ -287,17 +293,39 @@ jobs:
               git add .github/rp-stable-port-request.json
               git commit -m "ci: request manual RP stable port to ${NEW_TAG} [skip ci]"
               git push "$remote" "HEAD:refs/heads/${branch}"
-            fi
-            pr_url="$(
-              gh pr create \
-                --repo "$GITHUB_REPOSITORY" \
-                --base release/rp-stable \
-                --head "$branch" \
-                --draft \
-                --title "$title" \
-                --body-file "$body"
-            )"
-          fi
+              pr_url="$(
+                gh pr create \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --base release/rp-stable \
+                  --head "${GITHUB_REPOSITORY_OWNER}:${branch}" \
+                  --draft \
+                  --title "$title" \
+                  --body-file "$body"
+              )"
+              ;;
+            generated_marker)
+              if [[ -z "$pr" ]]; then
+                pr_url="$(
+                  gh pr create \
+                    --repo "$GITHUB_REPOSITORY" \
+                    --base release/rp-stable \
+                    --head "${GITHUB_REPOSITORY_OWNER}:${branch}" \
+                    --draft \
+                    --title "$title" \
+                    --body-file "$body"
+                )"
+              elif [[ "$pr_state" = "closed" ]]; then
+                gh pr reopen "$pr" --repo "$GITHUB_REPOSITORY"
+              fi
+              ;;
+            human_progress)
+              test -n "$pr_url"
+              ;;
+            *)
+              echo "Unexpected handoff state: ${handoff_state}" >&2
+              exit 1
+              ;;
+          esac
 
           echo "::warning title=Manual RP stable port required::${NEW_TAG} conflicts at ${FAILED_COMMIT}; use ${pr_url}"
           {

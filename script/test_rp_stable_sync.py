@@ -8,6 +8,7 @@ from rp_stable_sync import (
     RebaseRequest,
     StableSyncError,
     attempt_rebase,
+    classify_handoff,
     manual_port_body,
 )
 
@@ -56,6 +57,70 @@ class StableSyncTests(unittest.TestCase):
             new_sha=new_sha,
             new_version="1.22.0",
         )
+
+    def handoff_report(
+        self, release_tip: str, candidate: str
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "outcome": "manual_port_required",
+            "base_branch": "release/rp-stable",
+            "release_tip": release_tip,
+            "previous": {
+                "tag": "v1.18.0",
+                "commit": self.old_sha,
+                "version": "1.18.0",
+            },
+            "candidate": {
+                "tag": "v1.22.0",
+                "commit": candidate,
+                "version": "1.22.0",
+            },
+            "rebase": {
+                "failed_commit": release_tip,
+                "failed_subject": "RP patch",
+                "conflicted_paths": ["shared.txt"],
+            },
+        }
+
+    def handoff_pr(
+        self,
+        branch: str,
+        head: str,
+        body: str,
+        head_repository: str = "JonathonRP/zed",
+    ) -> dict[str, object]:
+        return {
+            "number": 23,
+            "state": "open",
+            "merged_at": None,
+            "html_url": "https://github.com/JonathonRP/zed/pull/23",
+            "body": body,
+            "head": {
+                "ref": branch,
+                "sha": head,
+                "repo": {"full_name": head_repository},
+            },
+            "base": {
+                "ref": "release/rp-stable",
+                "repo": {"full_name": "JonathonRP/zed"},
+            },
+        }
+
+    def make_handoff_commits(self) -> tuple[str, str]:
+        subprocess.run(
+            ["git", "-C", self.repo, "switch", "-qc", "release/rp-stable"],
+            check=True,
+        )
+        release_tip = commit_file(self.repo, "rp.txt", "rp\n", "RP patch")
+        subprocess.run(
+            ["git", "-C", self.repo, "switch", "-q", "--detach", self.old_sha],
+            check=True,
+        )
+        candidate = commit_file(
+            self.repo, "upstream.txt", "upstream\n", "new stable"
+        )
+        return release_tip, candidate
 
     def make_release_and_candidate(
         self, release_path: str, candidate_path: str
@@ -165,6 +230,150 @@ class StableSyncTests(unittest.TestCase):
                 "https://example.invalid/run/1",
             )
 
+    def test_prepositioned_unrelated_handoff_branch_is_rejected(self):
+        release_tip, candidate = self.make_handoff_commits()
+        unrelated_tip = commit_file(
+            self.repo, "unrelated.txt", "unrelated\n", "unrelated"
+        )
+        report = self.handoff_report(release_tip, candidate)
+
+        with self.assertRaisesRegex(
+            StableSyncError, "no durable request evidence"
+        ):
+            classify_handoff(
+                self.repo,
+                unrelated_tip,
+                "automation/rp-stable-v1.22.0-manual-port",
+                report,
+                [],
+                "JonathonRP/zed",
+            )
+
+    def test_handoff_pr_from_wrong_head_repository_is_rejected(self):
+        release_tip, candidate = self.make_handoff_commits()
+        subprocess.run(
+            ["git", "-C", self.repo, "switch", "-q", "release/rp-stable"],
+            check=True,
+        )
+        report = self.handoff_report(release_tip, candidate)
+        marker = self.repo / ".github/rp-stable-port-request.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(report), encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", self.repo, "add", ".github/rp-stable-port-request.json"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", self.repo, "commit", "-qm", "request port"], check=True
+        )
+        branch_tip = git(self.repo, "rev-parse", "HEAD")
+        pr = self.handoff_pr(
+            "automation/rp-stable-v1.22.0-manual-port",
+            branch_tip,
+            manual_port_body(report, "https://example.invalid/run/1"),
+            head_repository="attacker/zed",
+        )
+
+        with self.assertRaisesRegex(
+            StableSyncError, "head repository is not trusted"
+        ):
+            classify_handoff(
+                self.repo,
+                branch_tip,
+                "automation/rp-stable-v1.22.0-manual-port",
+                report,
+                [pr],
+                "JonathonRP/zed",
+            )
+
+    def test_stale_generated_request_identity_is_rejected(self):
+        release_tip, candidate = self.make_handoff_commits()
+        subprocess.run(
+            ["git", "-C", self.repo, "switch", "-q", "release/rp-stable"],
+            check=True,
+        )
+        report = self.handoff_report(release_tip, candidate)
+        stale_report = self.handoff_report(release_tip, candidate)
+        stale_report["candidate"]["version"] = "1.21.0"
+        marker = self.repo / ".github/rp-stable-port-request.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(stale_report), encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", self.repo, "add", ".github/rp-stable-port-request.json"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", self.repo, "commit", "-qm", "stale request"], check=True
+        )
+
+        with self.assertRaisesRegex(StableSyncError, "stale request identity"):
+            classify_handoff(
+                self.repo,
+                "HEAD",
+                "automation/rp-stable-v1.22.0-manual-port",
+                report,
+                [],
+                "JonathonRP/zed",
+            )
+
+    def test_valid_generated_marker_is_reused(self):
+        release_tip, candidate = self.make_handoff_commits()
+        subprocess.run(
+            ["git", "-C", self.repo, "switch", "-q", "release/rp-stable"],
+            check=True,
+        )
+        report = self.handoff_report(release_tip, candidate)
+        marker = self.repo / ".github/rp-stable-port-request.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps(report), encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", self.repo, "add", ".github/rp-stable-port-request.json"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", self.repo, "commit", "-qm", "request port"], check=True
+        )
+
+        handoff = classify_handoff(
+            self.repo,
+            "HEAD",
+            "automation/rp-stable-v1.22.0-manual-port",
+            report,
+            [],
+            "JonathonRP/zed",
+        )
+
+        self.assertEqual(handoff.state, "generated_marker")
+        self.assertEqual(handoff.pr_number, "")
+
+    def test_valid_human_progress_branch_is_reused(self):
+        release_tip, candidate = self.make_handoff_commits()
+        report = self.handoff_report(release_tip, candidate)
+        human_tip = commit_file(
+            self.repo, "manual-port.txt", "curated\n", "curate port"
+        )
+        branch = "automation/rp-stable-v1.22.0-manual-port"
+        pr = self.handoff_pr(
+            branch,
+            human_tip,
+            manual_port_body(report, "https://example.invalid/run/1"),
+        )
+
+        handoff = classify_handoff(
+            self.repo,
+            human_tip,
+            branch,
+            report,
+            [pr],
+            "JonathonRP/zed",
+        )
+
+        self.assertEqual(handoff.state, "human_progress")
+        self.assertEqual(handoff.pr_number, "23")
+        self.assertEqual(
+            handoff.pr_url, "https://github.com/JonathonRP/zed/pull/23"
+        )
+
     def test_non_conflict_rebase_failure_stays_an_error(self):
         release_tip, _ = self.make_release_and_candidate(
             "rp.txt", "upstream.txt"
@@ -186,7 +395,7 @@ class StableSyncTests(unittest.TestCase):
         self.assertIn("steps.rebase.outputs.outcome == 'conflict'", contents)
         self.assertIn("rp-stable-port-request.json", contents)
         self.assertIn("--draft", contents)
-        self.assertIn("--state all", contents)
+        self.assertIn("pulls?state=all&per_page=100", contents)
         self.assertNotIn("gh pr merge", contents)
         self.assertNotIn("gh release", contents)
         handoff = contents.split("- name: Surface manual stable port", 1)[1].split(
@@ -195,6 +404,8 @@ class StableSyncTests(unittest.TestCase):
         self.assertIn("-manual-port", handoff)
         self.assertIn("gh pr reopen", handoff)
         self.assertNotIn("--force", handoff)
+        self.assertIn("expected-repository", handoff)
+        self.assertIn("human_progress", handoff)
 
 
 if __name__ == "__main__":
