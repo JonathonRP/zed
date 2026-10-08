@@ -1,0 +1,32 @@
+{
+  "base_branch": "release/rp-stable",
+  "candidate": {
+    "commit": "c0199504b9cce79bc27524950022ed701bc3ebd5",
+    "tag": "v1.23.2",
+    "version": "1.23.2"
+  },
+  "outcome": "manual_port_required",
+  "previous": {
+    "commit": "76659a55a8c10ed355a070f8764a0b1733e3c115",
+    "tag": "v1.22.0",
+    "version": "1.22.0"
+  },
+  "rebase": {
+    "command": [
+      "git",
+      "rebase",
+      "--rebase-merges",
+      "--onto",
+      "c0199504b9cce79bc27524950022ed701bc3ebd5",
+      "76659a55a8c10ed355a070f8764a0b1733e3c115",
+      "release/rp-stable"
+    ],
+    "conflicted_paths": [
+      "crates/acp_thread/src/acp_thread.rs"
+    ],
+    "failed_commit": "5d64018f4af8199b1ca74b212ed078c9dd895ff5",
+    "failed_subject": "Port RP stable behavior to Zed v1.22.0"
+  },
+  "release_tip": "561dd6555266a139ffb3f5b7b4c4cd49146cd097",
+  "schema_version": 1
+}
