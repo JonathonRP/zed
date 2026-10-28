@@ -99,9 +99,9 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p acp_thread --lib tool_call 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-replay.log"
-          cargo test --locked --config .cargo/ci-config.toml -p acp_thread --lib submission:: 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-submission.log"
+          cargo test --locked --config .cargo/ci-config.toml -p acp_thread --lib receipt 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-submission.log"
 
-      - name: Native MCP tool binding
+      - name: ACP tools test target and v2 rollout override
         shell: bash
         run: |
           set -euo pipefail
