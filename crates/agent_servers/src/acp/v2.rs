@@ -2780,7 +2780,7 @@ mod tests {
             .await
             .expect("second setup");
         let ((request_a, responder_a), (request_b, responder_b)) =
-            if first.0.cwd == session_path("a") {
+            if first.0.cwd == acp::AbsolutePath::new(session_path("a")) {
                 (first, second)
             } else {
                 (second, first)
