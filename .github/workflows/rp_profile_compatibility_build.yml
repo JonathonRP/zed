@@ -53,6 +53,7 @@ jobs:
           persist-credentials: false
 
       - name: Record and verify exact source
+        id: source_verified
         shell: bash
         run: |
           set -euo pipefail
@@ -80,53 +81,91 @@ jobs:
           package-manager-cache: false
 
       - name: Download repository WASI SDK
+        id: dependencies_ready
         run: ./script/download-wasi-sdk
 
       - name: RP release guard regression tests
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           python3 -m unittest discover -s script -p 'test_rp*.py' 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/rp-python.log"
 
       - name: ACP connections and negotiated v2 lifecycle
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p agent_servers --lib acp:: 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/agent-servers.log"
 
-      - name: ACP replay and receipt regressions
+      - name: ACP tool-call replay regressions
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p acp_thread --lib tool_call 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-replay.log"
+
+      - name: ACP receipt regressions
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p acp_thread --lib receipt 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-submission.log"
 
-      - name: ACP tools test target and v2 rollout override
+      - name: ACP tools test target
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p acp_tools --lib 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-tools.log"
+
+      - name: ACP v2 rollout override
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p feature_flags --lib acp_beta_override_is_user_configurable_without_changing_other_flags 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-feature-flag.log"
 
-      - name: RP updater and isolated release identity
+      - name: Isolated release identity
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p release_channel --lib 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/release-channel.log"
+
+      - name: RP updater regressions
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p auto_update --lib rp_ 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/auto-update.log"
 
-      - name: RP extension catalog and document colors
+      - name: RP extension catalog
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p extension_host --lib rp_extension_catalog 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/catalog.log"
+
+      - name: Document colors
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p editor --lib document_color 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/document-colors.log"
 
-      - name: Exact-source remote path preflight and worktree ordering
+      - name: Exact-source remote path preflight
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p remote_server --lib test_resolve_abs_ 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/remote-paths.log"
+
+      - name: Remote worktree ordering
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p remote_server --lib test_open_remote_buffer_immediately_after_adding_worktree 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/remote-worktree.log"
 
       - name: Retain immutable source and actual test output
