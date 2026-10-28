@@ -300,11 +300,7 @@ impl ForegroundWorkItem for ReadWork {
                 // Opening a missing project path creates an empty buffer. Only an
                 // already-open buffer may bypass the existing text-file preflight.
                 if let Some(preflight) = preflight {
-                    if preflight
-                        .await
-                        .map_err(Error::into_internal_error)?
-                        .is_none()
-                    {
+                    if preflight.await.map_err(Error::from)?.is_none() {
                         return Err(Error::resource_not_found(Some(
                             arguments.path.display().to_string(),
                         )));
