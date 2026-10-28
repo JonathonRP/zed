@@ -245,6 +245,41 @@ async fn test_basic_remote_editing(cx: &mut TestAppContext, server_cx: &mut Test
     });
 }
 
+#[gpui::test(iterations = 20)]
+async fn test_open_remote_buffer_immediately_after_adding_worktree(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project": {
+                "README.md": "# project",
+            },
+        }),
+    )
+    .await;
+
+    let (project, _headless) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project"), false, cx)
+        })
+        .await
+        .unwrap();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            project.open_buffer((worktree_id, rel_path("README.md")), cx)
+        })
+        .await
+        .unwrap();
+
+    buffer.read_with(cx, |buffer, _| assert_eq!(buffer.text(), "# project"));
+}
+
 #[gpui::test]
 async fn test_remote_buffer_path_swap(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());
@@ -3155,6 +3190,65 @@ async fn test_remote_resolve_abs_path(cx: &mut TestAppContext, server_cx: &mut T
             .await
             .expect("existing file path should resolve without canonicalization");
         assert_eq!(resolved_file_path.abs_path(), Some(path));
+    }
+}
+
+#[gpui::test]
+async fn test_resolve_abs_text_file_path_preserves_metadata_modes(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({"project": {"file.txt": "body", "directory": {}}}),
+    )
+    .await;
+    fs.insert_file(path!("/code/project/binary.dat"), b"\0binary".to_vec())
+        .await;
+    fs.insert_symlink(path!("/code/linked"), PathBuf::from(path!("/code/project")))
+        .await;
+
+    let (remote_project, _headless) = init_test(&fs, cx, server_cx).await;
+    let local_project = Project::test(fs, [], cx).await;
+    for project in [remote_project, local_project] {
+        for path in [
+            path!("/code/linked/missing.txt"),
+            path!("/code/linked/directory"),
+            path!("/code/linked/binary.dat"),
+        ] {
+            let resolved = project
+                .update(cx, |project, cx| {
+                    project.resolve_abs_text_file_path(path, cx)
+                })
+                .await
+                .expect("preflight should succeed");
+            assert!(resolved.is_none(), "{path}");
+        }
+
+        let text_path = path!("/code/linked/file.txt");
+        let resolved = project
+            .update(cx, |project, cx| {
+                project.resolve_abs_text_file_path(text_path, cx)
+            })
+            .await
+            .expect("text preflight should succeed")
+            .expect("text file should resolve");
+        assert_eq!(resolved.abs_path(), Some(text_path));
+
+        let binary_path = path!("/code/linked/binary.dat");
+        let resolved = project
+            .update(cx, |project, cx| {
+                project.resolve_abs_file_path_canonical(binary_path, cx)
+            })
+            .await
+            .expect("canonical resolution should succeed")
+            .expect("binary files are still valid file links");
+        assert_eq!(resolved.abs_path(), Some(path!("/code/project/binary.dat")));
+        assert_eq!(
+            project.read_with(cx, |project, cx| project.worktrees(cx).count()),
+            0
+        );
     }
 }
 

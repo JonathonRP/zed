@@ -199,6 +199,26 @@ Zed-configured [MCP servers](./mcp.md) may be forwarded to External Agents over 
 
 If an MCP tool does not appear in an External Agent, check both Zed's MCP server configuration and the agent's native MCP configuration.
 
+### ACP v2 native project files
+
+The `acp-beta` feature flag enables ACP v2 negotiation for new connections:
+
+```json
+{
+  "feature_flags": {
+    "acp-beta": "on"
+  }
+}
+```
+
+This RP build permits this ACP-specific setting for non-staff users in release builds; it does not unlock other staff-only feature flags. Agents that explicitly support only ACP v1 are restarted with a fresh v1 connection. Set the flag to `"off"` to use v1 for subsequent connections.
+
+When a v2 agent advertises MCP-over-ACP support, Zed attaches the `zed-project-files` server to new and resumed sessions. Its read-only `read_text_file` tool uses the same project buffer reader as v1 ACP file requests, including unsaved edits, read tracking and 1-based `line`/`limit` selection. It cannot open paths outside existing project worktrees, create worktrees, write files or execute commands. Read authority ends when the session owner is released, replaced or disconnected.
+
+This server uses the SDK's stateless MCP **2026-07-28** binding over `mcp/message`, not an MCP `initialize` exchange. Each request must supply its own `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` in the inner `params._meta`. Discovery and tool listing are available during session setup; file reads require an established session owner. MCP errors remain inner MCP outcomes, and cancellation is scoped to the individual invocation.
+
+This is not a general upgrade of Zed's standalone MCP client. Configured stdio/HTTP servers are still forwarded according to the agent's advertised transport capabilities, and their protocol versions remain independently negotiated. The native server does not expose Zed's other agent tools, resources, prompts or reverse MCP requests.
+
 ## Debugging {#debugging-agents}
 
 Use {#action dev::OpenAcpLogs} from the Command Palette to inspect messages between Zed and an External Agent.

@@ -3,7 +3,8 @@ Param(
     [Parameter()][Alias('i')][switch]$Install,
     [Parameter()][Alias('h')][switch]$Help,
     [Parameter()][Alias('a')][string]$Architecture,
-    [Parameter()][string]$Name
+    [Parameter()][string]$Name,
+    [Parameter()][string[]]$ZedFeatures
 )
 
 . "$PSScriptRoot/lib/workspace.ps1"
@@ -14,6 +15,7 @@ $PSNativeCommandUseErrorActionPreference = $true
 
 $buildSuccess = $false
 $canCodeSign = $false
+$isRpPackage = -not [string]::IsNullOrWhiteSpace($env:ZED_RP_RELEASE_VERSION)
 
 $OSArchitecture = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     "X64" { "x86_64" }
@@ -40,10 +42,6 @@ function Get-VSArch {
     }
 }
 
-Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
-Pop-Location
-
 $target = "$Architecture-pc-windows-msvc"
 
 if ($Help) {
@@ -52,8 +50,182 @@ if ($Help) {
     Write-Output "Options:"
     Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)"
     Write-Output "  -Install, -i      Run the installer after building."
+    Write-Output "  -ZedFeatures      Additional Cargo features to enable for the Zed build."
     Write-Output "  -Help, -h         Show this help message."
     exit 0
+}
+
+$vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+$vsDevShell = if (Test-Path $vswhere) {
+    & $vswhere `
+        -latest `
+        -products * `
+        -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+        -find Common7\Tools\Launch-VsDevShell.ps1 |
+        Select-Object -First 1
+}
+
+if (-not $vsDevShell) {
+    $vsDevShell = @(
+        "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1",
+        "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\Tools\Launch-VsDevShell.ps1",
+        "C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\Tools\Launch-VsDevShell.ps1",
+        "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Launch-VsDevShell.ps1"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+
+if (-not $vsDevShell) {
+    throw "Could not find a Visual Studio developer shell with the C++ toolchain"
+}
+
+$script:cargoRustcWrapperConfig = $null
+function Invoke-BundleCargo {
+    param([string[]]$Arguments)
+
+    $cargoArguments = @($Arguments)
+    if ($script:cargoRustcWrapperConfig) {
+        # Cargo merges --config values from left to right. Keep the required
+        # wrapper last so package-specific configuration cannot override it.
+        $cargoArguments += @("--config", $script:cargoRustcWrapperConfig)
+    }
+    cargo @cargoArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cargo failed with exit code $LASTEXITCODE"
+    }
+}
+
+Push-Location
+$requiredRustcWrapper = $env:RUSTC_WRAPPER
+& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+Pop-Location
+if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
+    if ([string]::IsNullOrWhiteSpace($requiredRustcWrapper)) {
+        throw "ZED_REQUIRE_SCCACHE requires RUSTC_WRAPPER"
+    }
+    if (-not (Test-Path -LiteralPath $requiredRustcWrapper -PathType Leaf)) {
+        throw "RUSTC_WRAPPER does not resolve to the required sccache executable"
+    }
+
+    # The VS developer shell may replace the process environment. Reassert the
+    # action-provided wrapper before any Cargo process starts.
+    $env:RUSTC_WRAPPER = $requiredRustcWrapper
+    $env:CARGO_BUILD_RUSTC_WRAPPER = $requiredRustcWrapper
+    $env:SCCACHE_PATH = $requiredRustcWrapper
+    # Windows release links can exceed sccache's 600-second default idle
+    # timeout after the last cacheable compile. Keep the daemon alive so the
+    # final production statistics are not replaced by a fresh zeroed server.
+    $env:SCCACHE_IDLE_TIMEOUT = "0"
+    $script:cargoRustcWrapperConfig = "build.rustc-wrapper='$requiredRustcWrapper'"
+
+    Write-Host "RP Windows sccache wrapper: $requiredRustcWrapper"
+    Write-Host "RP Windows sccache idle timeout: $env:SCCACHE_IDLE_TIMEOUT (disabled)"
+    & $requiredRustcWrapper --version
+    # Replace a daemon left by a persistent runner so this job always starts
+    # one with the current backend credentials and disabled idle timeout.
+    if (Get-Process -Name "sccache" -ErrorAction SilentlyContinue) {
+        & $requiredRustcWrapper --stop-server | Out-Null
+    }
+    & $requiredRustcWrapper --start-server
+    & $requiredRustcWrapper --zero-stats
+
+    $probeDir = Join-Path $env:RUNNER_TEMP "rp-sccache-probe"
+    $probeSourceDir = Join-Path $probeDir "src"
+    New-Item -ItemType Directory -Force -Path $probeSourceDir | Out-Null
+    $probeManifest = Join-Path $probeDir "Cargo.toml"
+    $probeSource = Join-Path $probeSourceDir "lib.rs"
+    $probeOutput = Join-Path $probeDir "target\release\librp_sccache_probe.rlib"
+    @(
+        "[package]"
+        'name = "rp-sccache-probe"'
+        'version = "0.1.0"'
+        'edition = "2024"'
+    ) | Set-Content -LiteralPath $probeManifest -Encoding utf8
+    "pub fn rp_sccache_probe() -> u32 { 42 }" |
+        Set-Content -LiteralPath $probeSource -Encoding utf8
+    Invoke-BundleCargo -Arguments @(
+        "build",
+        "--release",
+        "--manifest-path", $probeManifest,
+        "--target-dir", (Join-Path $probeDir "target"),
+        "--lib"
+    )
+    if (-not (Test-Path -LiteralPath $probeOutput -PathType Leaf)) {
+        throw "RP Windows Cargo sccache probe failed"
+    }
+
+    $probeStats = (
+        & $requiredRustcWrapper --show-stats --stats-format json |
+            ConvertFrom-Json
+    )
+    if ($probeStats.stats.compile_requests -lt 1 -or $probeStats.stats.requests_executed -lt 1) {
+        throw "RP Windows Cargo sccache probe did not register a cacheable compile request"
+    }
+    Write-Host "RP Windows sccache controlled probe statistics:"
+    & $requiredRustcWrapper --show-stats
+    & $requiredRustcWrapper --zero-stats
+    Write-Host "RP Windows sccache statistics reset; subsequent counts are release build only"
+}
+
+function Assert-RpSccacheBuild {
+    if ([string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
+        return
+    }
+
+    $stats = (
+        & $requiredRustcWrapper --show-stats --stats-format json |
+            ConvertFrom-Json
+    )
+    $compileRequests = [int64]$stats.stats.compile_requests
+    Write-Host "RP Windows release build sccache statistics:"
+    & $requiredRustcWrapper --show-stats
+    if ($compileRequests -lt 100) {
+        throw "RP Windows release build registered only $compileRequests sccache requests"
+    }
+    if ($env:GITHUB_STEP_SUMMARY) {
+        @(
+            "### RP Windows release build sccache"
+            ""
+            "- Compile requests: $compileRequests"
+            "- Probe requests excluded: yes"
+        ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
+    }
+}
+
+function Test-RpSccacheProductionPath {
+    if ([string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
+        return
+    }
+
+    $preflightTargetDir = Join-Path $env:RUNNER_TEMP "rp-sccache-production-preflight"
+    if (Test-Path -LiteralPath $preflightTargetDir) {
+        Remove-Item -LiteralPath $preflightTargetDir -Recurse -Force
+    }
+
+    & $requiredRustcWrapper --zero-stats
+    Write-Host "Testing the production Cargo configuration before the full Windows build"
+    Invoke-BundleCargo -Arguments @(
+        "--config", ".cargo/bundle-config.toml",
+        "build",
+        "--release",
+        "--package", "refineable",
+        "--target", $target,
+        "--target-dir", $preflightTargetDir
+    )
+
+    $preflightStats = (
+        & $requiredRustcWrapper --show-stats --stats-format json |
+            ConvertFrom-Json
+    )
+    $compileRequests = [int64]$preflightStats.stats.compile_requests
+    $requestsExecuted = [int64]$preflightStats.stats.requests_executed
+    Write-Host "RP Windows production-path preflight sccache statistics:"
+    & $requiredRustcWrapper --show-stats
+    if ($compileRequests -lt 1 -or $requestsExecuted -lt 1) {
+        throw "RP Windows production Cargo path bypassed sccache; refusing to start the full build"
+    }
+
+    & $requiredRustcWrapper --zero-stats
+    Write-Host "RP Windows sccache statistics reset; subsequent counts are release build only"
 }
 
 Push-Location -Path crates/zed
@@ -74,6 +246,11 @@ function CheckEnvironmentVariables {
             Write-Error "$var is not set"
             exit 1
         }
+    }
+
+    if ($isRpPackage) {
+        Write-Host "RP stable installers are intentionally unsigned"
+        return
     }
 
     # On PRs from forks the signing secrets are not populated,
@@ -105,6 +282,12 @@ function PrepareForBundle {
     New-Item -Path "$innoDir\appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
     New-Item -Path "$innoDir\tools" -ItemType Directory -Force
+    if ($isRpPackage) {
+        @(
+            "identity=Zed-ACP-Patched-RP-Stable"
+            "version=$env:ZED_RP_RELEASE_VERSION"
+        ) | Set-Content -Path "$innoDir\zed-rp-installer.marker"
+    }
 
     rustup target add $target
 }
@@ -116,20 +299,32 @@ function GenerateLicenses {
 function BuildZedAndItsFriends {
     Write-Output "Building Zed and its friends, for channel: $channel"
     # Build zed.exe, cli.exe and auto_update_helper.exe
-    cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
+    $zedBuildArgs = @(
+        '--config', '.cargo/bundle-config.toml',
+        'build',
+        '--release',
+        '--package', 'zed',
+        '--package', 'cli',
+        '--package', 'auto_update_helper',
+        '--target', $target
+    )
+    if ($ZedFeatures) {
+        $zedBuildArgs += @('--features', ($ZedFeatures -join ','))
+    }
+    Invoke-BundleCargo -Arguments $zedBuildArgs
     Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
     # Build explorer_command_injector.dll
     switch ($channel) {
         "stable" {
-            cargo --config .cargo/bundle-config.toml build --release --features stable --no-default-features --package explorer_command_injector --target $target
+            Invoke-BundleCargo -Arguments @("--config", ".cargo/bundle-config.toml", "build", "--release", "--features", "stable", "--no-default-features", "--package", "explorer_command_injector", "--target", $target)
         }
         "preview" {
-            cargo --config .cargo/bundle-config.toml build --release --features preview --no-default-features --package explorer_command_injector --target $target
+            Invoke-BundleCargo -Arguments @("--config", ".cargo/bundle-config.toml", "build", "--release", "--features", "preview", "--no-default-features", "--package", "explorer_command_injector", "--target", $target)
         }
         default {
-            cargo --config .cargo/bundle-config.toml build --release --package explorer_command_injector --target $target
+            Invoke-BundleCargo -Arguments @("--config", ".cargo/bundle-config.toml", "build", "--release", "--package", "explorer_command_injector", "--target", $target)
         }
     }
     Copy-Item -Path ".\$CargoOutDir\explorer_command_injector.dll" -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
@@ -137,7 +332,7 @@ function BuildZedAndItsFriends {
 
 function BuildRemoteServer {
     Write-Output "Building remote_server for $target"
-    cargo --config .cargo/bundle-config.toml build --release --package remote_server --target $target
+    Invoke-BundleCargo -Arguments @("--config", ".cargo/bundle-config.toml", "build", "--release", "--package", "remote_server", "--target", $target)
 
     # Create zipped remote server binary
     $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
@@ -326,6 +521,23 @@ function BuildInstaller {
         }
     }
 
+    if ($isRpPackage) {
+        if ($channel -ne "stable") {
+            throw "RP packaging metadata may only be used with the stable release channel"
+        }
+
+        $appId = "{{4A5A5F9D-AE49-4238-AD6B-FD55FEF6DA84}"
+        $appName = "Zed-RP"
+        $appDisplayName = "Zed-RP (Unsigned RP Stable)"
+        # This must match release_channel::app_identifier() plus the runtime mutex suffix.
+        $appMutex = "Zed-ACP-Patched-RP-Stable-Instance-Mutex"
+        $appExeName = "Zed"
+        $regValueName = "ZedRPStable"
+        $appUserId = "Zed-ACP-Patched-RP-Stable"
+        $appShellNameShort = "Zed-RP"
+        $appAppxFullName = ""
+    }
+
     # Windows runner 2022 default has iscc in PATH, https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
     # Currently, we are using Windows 2022 runner.
     # Windows runner 2025 doesn't have iscc in PATH for now, https://github.com/actions/runner-images/issues/11228
@@ -347,6 +559,10 @@ function BuildInstaller {
         "Version"        = "$env:RELEASE_VERSION"
         "SourceDir"      = "$env:ZED_WORKSPACE"
         "AppxFullName"   = $appAppxFullName
+    }
+    if ($isRpPackage) {
+        $definitions["RpPackage"] = "1"
+        $env:ZED_SIGN_BUNDLE = $null
     }
 
     $defs = @()
@@ -385,8 +601,14 @@ $debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_REL
 CheckEnvironmentVariables
 PrepareForBundle
 GenerateLicenses
+if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
+    & $requiredRustcWrapper --zero-stats
+    Write-Host "RP Windows sccache statistics reset after license generation"
+}
+Test-RpSccacheProductionPath
 BuildZedAndItsFriends
 BuildRemoteServer
+Assert-RpSccacheBuild
 MakeAppx
 SignZedAndItsFriends
 ZipZedAndItsFriendsDebug
