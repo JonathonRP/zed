@@ -15,6 +15,7 @@ pub struct FeatureFlagDescriptor {
     pub default_variant_key: fn() -> &'static str,
     pub enabled_for_all: fn() -> bool,
     pub enabled_for_staff: fn() -> bool,
+    pub allows_user_override: fn() -> bool,
     pub type_id: fn() -> TypeId,
 }
 
@@ -60,6 +61,7 @@ macro_rules! register_feature_flag {
                 },
                 enabled_for_all: <$flag as $crate::FeatureFlag>::enabled_for_all,
                 enabled_for_staff: <$flag as $crate::FeatureFlag>::enabled_for_staff,
+                allows_user_override: <$flag as $crate::FeatureFlag>::allows_user_override,
                 type_id: || std::any::TypeId::of::<$flag>(),
             }
         }
@@ -98,8 +100,8 @@ impl FeatureFlagStore {
 
     /// Whether feature flag overrides from settings should be honored.
     ///
-    /// Overrides are a staff-only affordance, so non-staff users in release
-    /// builds can't flip flags through `settings.json` or the settings UI.
+    /// Most overrides are a staff-only affordance. Individual flags can
+    /// explicitly allow user opt-in through `settings.json` in release builds.
     /// Debug builds are always treated as staff, and `ZED_DISABLE_STAFF`
     /// forces the user to be treated as non-staff for testing.
     pub fn overrides_enabled(&self) -> bool {
@@ -169,7 +171,7 @@ impl FeatureFlagStore {
         }
 
         // Only apply overrides when they are specifically enabled.
-        if self.overrides_enabled() {
+        if T::allows_user_override() || self.overrides_enabled() {
             if let Some(override_key) = FeatureFlagsSettings::get_global(cx).overrides.get(T::NAME)
             {
                 return variant_from_key::<T::Value>(override_key);
@@ -209,7 +211,7 @@ impl FeatureFlagStore {
         }
 
         // Only apply overrides when they are specifically enabled.
-        if self.overrides_enabled() {
+        if (descriptor.allows_user_override)() || self.overrides_enabled() {
             if let Some(requested) = FeatureFlagsSettings::get_global(cx)
                 .overrides
                 .get(descriptor.name)
@@ -382,6 +384,24 @@ mod tests {
         let store = FeatureFlagStore::default();
         set_override(DemoFlag::NAME, "on", cx);
         assert!(store.has_flag::<DemoFlag>(cx));
+    }
+
+    #[gpui::test]
+    fn acp_beta_override_is_user_configurable_without_changing_other_flags(cx: &mut App) {
+        use crate::AcpBetaFeatureFlag;
+
+        init_settings_store(cx);
+        assert!(AcpBetaFeatureFlag::allows_user_override());
+        assert!(!DemoFlag::allows_user_override());
+        let store = FeatureFlagStore::default();
+        let descriptor = FeatureFlagStore::known_flags()
+            .find(|descriptor| descriptor.name == AcpBetaFeatureFlag::NAME)
+            .expect("ACP flag descriptor");
+        for (setting, expected) in [("off", false), ("on", true)] {
+            set_override(AcpBetaFeatureFlag::NAME, setting, cx);
+            assert_eq!(store.has_flag::<AcpBetaFeatureFlag>(cx), expected);
+            assert_eq!(store.resolved_key(descriptor, cx), setting);
+        }
     }
 
     /// No rule applies, so the store's `try_flag_value` returns `None`. The

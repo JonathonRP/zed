@@ -4,6 +4,49 @@
 second GitHub account. RP stable releases instead separate merge, compatibility
 evidence, and publication into auditable owner actions.
 
+## Manual v1.25.3 product port
+
+The product foundation is exactly official `v1.25.3` at
+`8dd255c3eafb5231056fe4e6f601cedd011f1c93`, not the moving latest release.
+The RP updater, extension catalog, document-color controls, Windows identity,
+and exact-source remote behavior are retained. The metadata RPC keeps
+upstream's `canonicalize` field at tag 3 and adds RP's `check_binary` at tag 4;
+both ends must come from the same product source.
+
+The ACP runtime includes selected upstream backports through
+`fae8a354829e56bf5615fedfa8cdfecb124550c4` (v2 selection), including the
+retained-session-owner prerequisite `39323b8179`. Enable v2 for subsequent
+connections with `"feature_flags": {"acp-beta": "on"}`; `"off"` selects v1.
+This is an explicit opt-in to a draft protocol, not a change to the installed
+profile. Negotiation uses the real v2 adapter and preserves fresh-process v1
+fallback, prompt receipts, reported foreground state, replay, cancellation,
+and session teardown.
+
+ACP v2 and MCP 2026-07-28 are different protocols. A v2 agent that advertises
+native MCP-over-ACP can receive the SDK-backed `zed-project-files` offering on
+new and resumed sessions. Its read-only `read_text_file` tool uses Zed's
+project buffers, including unsaved edits. The native binding supports
+`server/discover`, `tools/list`, and `tools/call` with per-request MCP metadata
+and no MCP `initialize` handshake. Inner MCP outcomes remain distinct from
+outer ACP errors; cancellation and registration cleanup are request-scoped.
+This is not a full MCP extension implementation: no write/terminal tools,
+subscriptions, or interactive MRTR tools are offered. External MCP server
+configuration can still be passed to capable agents via stdio/HTTP, but that
+does not establish which MCP version those agents use. Zed's separate
+`context_server` client remains on its existing initialize-based revisions
+(latest `2025-11-25`), not stateless MCP 2026-07-28.
+
+The curated source is a descendant of the pinned upstream commit. Its
+integration commit has the exact previous release tip as first parent, the
+curated source as second parent, and a tree byte-identical to that second
+parent. The ordinary stable-sync workflow and release-authorization verifier
+remain unchanged. Supplementary focused protocol tests are not owner
+attestation and do not replace the ordinary compatibility check.
+
+An installed schema-1-only RP updater needs a one-time installer bootstrap
+before it can consume schema-2 manifests. This port does not authorize
+publication, installation, profile migration, or a release-branch merge.
+
 ## Trust boundaries
 
 The release workflow distinguishes two commits:
@@ -25,6 +68,24 @@ assembly, and publication run only for a manual dispatch. A manual dispatch
 with `publish_release=false` performs a complete non-publishing rebuild.
 Release runs are never canceled by a newer run, avoiding interruption while an
 immutable release is being created.
+
+Windows packaging preserves all `ZED_RP_*` values across Visual Studio developer
+shell initialization. That shell imports a line-oriented environment and can
+otherwise truncate the JSON manifest and release notes to their first lines.
+Before Cargo runs, packaging checks the restored identity and release-notes
+SHA-256. Before copying the built client into the bundle, it runs
+`zed.exe --verify-rp-release-metadata target/rp-release-metadata` to compare the
+actual embedded manifest, source/version identity, and complete notes with the
+generated files. This command exits without initializing the app, opening a
+profile, or checking for updates.
+
+Run the focused multiline environment and Rust `option_env!` regression with:
+
+```powershell
+pwsh -NoProfile -File script\test-rp-release-metadata.ps1
+```
+
+The Windows packaging identity check also runs this regression.
 
 ## Required evidence
 
