@@ -44,6 +44,31 @@ pwsh -NoProfile -File script\test-rp-release-metadata.ps1
 
 The Windows packaging identity check also runs this regression.
 
+## Installed calendar floor
+
+The product source pins an exclusive minimum calendar version in
+`.github/rp-release-calendar.json`. Metadata generation requires this file and
+allocates each new version above both its floor and all published calendar tags.
+The floor is read from the exact product commit using `git show`, never from an
+uncommitted working-tree file or a later control commit.
+The floor is `20261028.1` because that calendar is already installed from the
+unpublished 1.22 bootstrap. Publishing `20261028.1` again would not offer that
+installation an update, even if the public release points to a new source.
+
+Before final source validation, record the highest calendar version installed
+from any unpublished build in `minimum_exclusive`. Raise it if a later build
+was installed; never lower it or create reservation tags to stand in for
+installation evidence. Revalidate the resulting immutable source normally.
+An existing tag on the same source remains reusable only if its version exceeds
+the floor; otherwise generation fails instead of rewriting that identity.
+Allocation also fails if the UTC date predates a known calendar identity or the
+next patch exceeds the client's 32-bit limit.
+
+Both compatibility and production workflows use this policy through the same
+metadata generator. Passing a compatibility build does not publish its calendar
+or authorize a release. Do not install a new compatibility calendar after final
+source validation without rechecking the public release's exclusive minimum.
+
 ## Required evidence
 
 Every release target must be a unique merge on the first-parent history of
