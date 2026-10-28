@@ -3204,8 +3204,19 @@ async fn test_resolve_abs_text_file_path_preserves_metadata_modes(
         json!({"project": {"file.txt": "body", "directory": {}}}),
     )
     .await;
-    fs.insert_file(path!("/code/project/binary.dat"), b"\0binary".to_vec())
-        .await;
+    fs.insert_file(
+        path!("/code/project/binary.dat"),
+        b"\x7FELF\x02\x01\x01\x00".to_vec(),
+    )
+    .await;
+    fs.insert_file(
+        path!("/code/project/utf16.txt"),
+        "UTF-16 text\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    )
+    .await;
     fs.insert_symlink(path!("/code/linked"), PathBuf::from(path!("/code/project")))
         .await;
 
@@ -3226,15 +3237,19 @@ async fn test_resolve_abs_text_file_path_preserves_metadata_modes(
             assert!(resolved.is_none(), "{path}");
         }
 
-        let text_path = path!("/code/linked/file.txt");
-        let resolved = project
-            .update(cx, |project, cx| {
-                project.resolve_abs_text_file_path(text_path, cx)
-            })
-            .await
-            .expect("text preflight should succeed")
-            .expect("text file should resolve");
-        assert_eq!(resolved.abs_path(), Some(text_path));
+        for text_path in [
+            path!("/code/linked/file.txt"),
+            path!("/code/linked/utf16.txt"),
+        ] {
+            let resolved = project
+                .update(cx, |project, cx| {
+                    project.resolve_abs_text_file_path(text_path, cx)
+                })
+                .await
+                .expect("text preflight should succeed")
+                .expect("text file should resolve");
+            assert_eq!(resolved.abs_path(), Some(text_path));
+        }
 
         let binary_path = path!("/code/linked/binary.dat");
         let resolved = project

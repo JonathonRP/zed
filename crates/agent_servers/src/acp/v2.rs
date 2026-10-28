@@ -2518,7 +2518,20 @@ mod tests {
             .await;
         harness
             .filesystem
-            .insert_file(session_path("a/binary.dat"), b"\0binary".to_vec())
+            .insert_file(
+                session_path("a/binary.dat"),
+                b"\x7FELF\x02\x01\x01\x00".to_vec(),
+            )
+            .await;
+        harness
+            .filesystem
+            .insert_file(
+                session_path("a/utf16.txt"),
+                "UTF-16 text\n"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect(),
+            )
             .await;
         *harness.hold_new_responses.lock().expect("defer setup") = true;
         let mut creation = cx.update(|cx| {
@@ -2679,6 +2692,19 @@ mod tests {
                 });
             }
         }
+        let utf16 = native_mcp_request(
+            &harness,
+            &server_id,
+            "utf16-text",
+            "tools/call",
+            native_mcp_params(json!({
+                "name": "read_text_file", "arguments": {"path": session_path("a/utf16.txt")}
+            })),
+            cx,
+        )
+        .await;
+        assert_eq!(utf16["result"]["isError"], false, "{utf16}");
+        assert_eq!(utf16["result"]["content"][0]["text"], "UTF-16 text\n");
         let new_path = session_path("a/new-unsaved.txt");
         let new_buffer = cx.update(|cx| {
             harness.project.update(cx, |project, cx| {
