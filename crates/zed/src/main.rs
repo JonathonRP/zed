@@ -212,6 +212,16 @@ fn main() {
 
     let args = Args::parse();
 
+    if let Some(directory) = &args.verify_rp_release_metadata {
+        match verify_rp_release_metadata(directory) {
+            Ok(()) => process::exit(0),
+            Err(error) => {
+                eprintln!("RP embedded release metadata verification failed: {error:#}");
+                process::exit(1);
+            }
+        }
+    }
+
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass
     #[cfg(not(target_os = "windows"))]
     if let Some(socket) = &args.askpass {
@@ -676,9 +686,7 @@ fn main() {
         );
         command_palette::init(cx);
         let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
-            enterprise_uri: language::language_settings::all_language_settings(None, cx)
-                .edit_predictions
-                .copilot
+            enterprise_uri: settings::CopilotSettings::get_global(cx)
                 .enterprise_uri
                 .clone(),
         };
@@ -1689,9 +1697,49 @@ fn stdout_is_a_pty() -> bool {
     !*FORCE_CLI_MODE && io::stdout().is_terminal()
 }
 
+fn verify_rp_release_metadata(directory: &Path) -> anyhow::Result<()> {
+    let metadata = release_channel::rp_release_metadata()
+        .context("executable has no complete RP compile-time metadata")?;
+    let expected: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.join("rp-release-manifest.json"))?)
+            .context("invalid expected RP release manifest")?;
+    let embedded: serde_json::Value =
+        serde_json::from_str(metadata.manifest).context("invalid embedded RP release manifest")?;
+    anyhow::ensure!(
+        embedded == expected,
+        "embedded RP manifest differs from the generated release manifest"
+    );
+    for (field, value) in [
+        ("calendar_version", metadata.calendar_version),
+        ("tag", metadata.release_tag),
+        ("upstream_tag", metadata.upstream_tag),
+        ("upstream_tag_commit", metadata.upstream_tag_commit),
+        ("notes_identity", metadata.notes_identity),
+        ("upstream_version", env!("CARGO_PKG_VERSION")),
+        (
+            "commit",
+            option_env!("ZED_COMMIT_SHA").context("executable has no compiled source SHA")?,
+        ),
+    ] {
+        anyhow::ensure!(
+            expected.get(field).and_then(serde_json::Value::as_str) == Some(value),
+            "compiled RP {field} differs from the generated release manifest"
+        );
+    }
+    anyhow::ensure!(
+        metadata.release_notes.as_bytes() == std::fs::read(directory.join("release-notes.md"))?,
+        "embedded RP release notes differ from the generated release notes"
+    );
+    Ok(())
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "zed", disable_version_flag = true, max_term_width = 100)]
 struct Args {
+    /// Verify the packaged compile-time identity without initializing the app.
+    #[arg(long, hide = true, value_name = "METADATA_DIR")]
+    verify_rp_release_metadata: Option<PathBuf>,
+
     /// A sequence of space-separated paths or urls that you want to open.
     ///
     /// Use `path:line:row` syntax to open a file at a specific location.
@@ -1926,7 +1974,12 @@ fn load_user_themes_in_background(fs: Arc<dyn fs::Fs>, cx: &mut App) {
                 let Some(theme_path) = theme_path.log_err() else {
                     continue;
                 };
-                let Some(bytes) = fs.load_bytes(&theme_path).await.log_err() else {
+                let Some(bytes) = fs
+                    .load_bytes(&theme_path)
+                    .await
+                    .with_context(|| format!("loading theme bytes from {theme_path:?}"))
+                    .log_err()
+                else {
                     continue;
                 };
 
@@ -1958,7 +2011,11 @@ fn watch_themes(fs: Arc<dyn fs::Fs>, cx: &mut App) {
                     .is_some_and(|m| !m.is_dir)
                 {
                     let theme_registry = cx.update(|cx| ThemeRegistry::global(cx));
-                    if let Some(bytes) = fs.load_bytes(&event.path).await.log_err()
+                    if let Some(bytes) = fs
+                        .load_bytes(&event.path)
+                        .await
+                        .with_context(|| format!("loading theme bytes from {:?}", event.path))
+                        .log_err()
                         && load_user_theme(&theme_registry, &bytes).log_err().is_some()
                     {
                         cx.update(theme_settings::reload_theme);
