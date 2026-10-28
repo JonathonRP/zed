@@ -98,6 +98,15 @@ jobs:
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p agent_servers --lib acp:: 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/agent-servers.log"
 
+      - name: Native MCP GPUI lifecycle seed sweep
+        if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
+        env:
+          ITERATIONS: "20"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --config .cargo/ci-config.toml -p agent_servers --lib v2_native_mcp_sdk_ 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/native-mcp-seeds.log"
+
       - name: ACP tool-call replay regressions
         if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
         shell: bash
@@ -202,6 +211,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify source and Windows package identity
+        id: windows_source_verified
         shell: pwsh
         run: |
           if ((git rev-parse HEAD) -cne $env:SOURCE_SHA) { throw "Source SHA mismatch" }
@@ -212,14 +222,24 @@ jobs:
             "workflow_ref=$env:GITHUB_WORKFLOW_REF"
             "Supplementary only; no installer build, publication, or owner attestation."
           ) | Tee-Object -FilePath "$env:RUNNER_TEMP\rp-port-evidence\source.txt" | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
-          & .\script\test-bundle-windows-identity.ps1
+          & .\script\test-bundle-windows-identity.ps1 2>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP\rp-port-evidence\windows-metadata-regression.log"
 
       - name: Type-check port-sensitive Windows source and tests
+        if: ${{ !cancelled() && steps.windows_source_verified.outcome == 'success' }}
         shell: pwsh
         run: |
           cargo check --locked --config .cargo/ci-config.toml --tests -p agent_servers -p acp_tools -p auto_update -p extension_host -p editor -p remote_server 2>&1 |
             Tee-Object -FilePath "$env:RUNNER_TEMP\rp-port-evidence\windows-check.log"
           if ($LASTEXITCODE -ne 0) { throw "Windows focused cargo check failed" }
+
+      - name: Type-check packaged Windows startup and ACP consumers
+        if: ${{ !cancelled() && steps.windows_source_verified.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          cargo check --locked --config .cargo/ci-config.toml -p zed --bin zed 2>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP\rp-port-evidence\windows-startup-check.log"
+          if ($LASTEXITCODE -ne 0) { throw "Windows startup cargo check failed" }
 
       - name: Retain immutable source and type-check output
         if: always()
