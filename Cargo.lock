@@ -14984,6 +14984,7 @@ dependencies = [
  "env_logger 0.11.8",
  "extension",
  "extension_host",
+ "file_content",
  "fs",
  "futures 0.3.34",
  "git",

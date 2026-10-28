@@ -64,9 +64,21 @@ pub(super) struct ReadTextFile {
     pub limit: Option<u32>,
 }
 
+#[derive(Debug)]
+pub(super) enum ReadError {
+    InvalidArguments(String),
+    Execution(Error),
+}
+
+impl From<Error> for ReadError {
+    fn from(error: Error) -> Self {
+        Self::Execution(error)
+    }
+}
+
 pub(super) fn server<Read>(read: Read) -> McpServer<Agent>
 where
-    Read: Fn(ReadTextFile, McpRequestContext<Agent>) -> BoxFuture<'static, Result<String, Error>>
+    Read: Fn(ReadTextFile, McpRequestContext<Agent>) -> BoxFuture<'static, Result<String, ReadError>>
         + Clone
         + Send
         + Sync
@@ -77,17 +89,22 @@ where
 
 struct ProjectFiles<Read>(Read);
 
-fn outcome(error: Error) -> McpOutcome {
-    let mut error_outcome = McpError::new(error.code.into(), error.message);
-    if let Some(data) = error.data {
-        error_outcome = error_outcome.data(data);
-    }
-    McpOutcome::Error(error_outcome)
+fn invalid_params(message: impl Into<String>) -> McpOutcome {
+    McpOutcome::Error(McpError::new(-32602, message))
+}
+
+fn tool_result(text: String, is_error: bool) -> McpOutcome {
+    McpOutcome::Result(json!({
+        "resultType": "complete",
+        "_meta": {"io.modelcontextprotocol/serverInfo": {"name": NAME, "version": "1"}},
+        "content": [{"type": "text", "text": text}],
+        "isError": is_error
+    }))
 }
 
 impl<Read> McpService<Agent> for ProjectFiles<Read>
 where
-    Read: Fn(ReadTextFile, McpRequestContext<Agent>) -> BoxFuture<'static, Result<String, Error>>
+    Read: Fn(ReadTextFile, McpRequestContext<Agent>) -> BoxFuture<'static, Result<String, ReadError>>
         + Clone
         + Send
         + Sync
@@ -102,14 +119,18 @@ where
         async move {
             match request.method.as_str() {
                 "server/discover" => Ok(McpOutcome::Result(json!({
+                    "resultType": "complete",
+                    "ttlMs": 0,
+                    "cacheScope": "private",
                     "supportedVersions": ["2026-07-28"],
-                    "serverInfo": {"name": NAME, "version": "1"},
+                    "_meta": {"io.modelcontextprotocol/serverInfo": {"name": NAME, "version": "1"}},
                     "capabilities": {"tools": {}}
                 }))),
                 "tools/list" => Ok(McpOutcome::Result(json!({
                     "resultType": "complete",
                     "ttlMs": 0,
                     "cacheScope": "private",
+                    "_meta": {"io.modelcontextprotocol/serverInfo": {"name": NAME, "version": "1"}},
                     "tools": [{
                         "name": "read_text_file",
                         "description": "Read text from a file in this Zed session's project, including unsaved edits. Paths must be absolute and belong to an existing project worktree. Optional line and limit select a 1-based line range.",
@@ -134,26 +155,30 @@ where
                 "tools/call" => {
                     let params = request.params.unwrap_or_default();
                     if params.get("name").and_then(Value::as_str) != Some("read_text_file") {
-                        return Ok(outcome(Error::invalid_params().data("Unknown Zed file tool")));
+                        return Ok(invalid_params("Unknown Zed file tool"));
                     }
                     let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
                     let arguments: ReadTextFile = match serde_json::from_value(arguments) {
                         Ok(arguments) => arguments,
-                        Err(error) => return Ok(outcome(Error::invalid_params().data(error.to_string()))),
+                        Err(error) => return Ok(invalid_params(error.to_string())),
                     };
                     if arguments.line == Some(0) {
-                        return Ok(outcome(Error::invalid_params().data("line must be 1-based")));
+                        return Ok(invalid_params("line must be 1-based"));
                     }
                     Ok(match read(arguments, context).await {
-                        Ok(text) => McpOutcome::Result(json!({
-                            "resultType": "complete",
-                            "content": [{"type": "text", "text": text}],
-                            "isError": false
-                        })),
-                        Err(error) => outcome(error),
+                        Ok(text) => tool_result(text, false),
+                        Err(ReadError::InvalidArguments(message)) => invalid_params(message),
+                        Err(ReadError::Execution(error)) => {
+                            let message = match error.data {
+                                Some(Value::String(detail)) => format!("{}: {detail}", error.message),
+                                Some(detail) => format!("{}: {detail}", error.message),
+                                None => error.message,
+                            };
+                            tool_result(message, true)
+                        }
                     })
                 }
-                _ => Ok(outcome(Error::method_not_found())),
+                _ => Ok(McpOutcome::Error(McpError::new(-32601, "Method not found"))),
             }
         }
         .boxed()
@@ -274,7 +299,7 @@ mod tests {
                     let request = connection
                         .build_session(cwd)
                         .with_mcp_server(server(|_, _| {
-                            futures::future::ready(Ok::<_, Error>(String::new())).boxed()
+                            futures::future::ready(Ok::<_, ReadError>(String::new())).boxed()
                         }))?
                         .start_session();
                     yield_transport().await;
@@ -354,10 +379,20 @@ mod tests {
                                 .map_err(Error::into_internal_error)?;
                             context.operation_cancellation().cancelled().await;
                             cleaned.store(true, Ordering::SeqCst);
-                            return Err(Error::request_cancelled());
+                            return Err(Error::request_cancelled().into());
                         }
                         if arguments.path == PathBuf::from("missing") {
-                            return Err(Error::resource_not_found(Some("missing".into())));
+                            return Err(Error::resource_not_found(Some("missing".into())).into());
+                        }
+                        if arguments.path == PathBuf::from("past-end") {
+                            return Err(Error::invalid_params()
+                                .data("Read beyond the end of the file")
+                                .into());
+                        }
+                        if arguments.path == PathBuf::from("invalid-path") {
+                            return Err(ReadError::InvalidArguments(
+                                "path must be absolute".into(),
+                            ));
                         }
                         Ok(format!(
                             "{}:{:?}:{:?}",
@@ -439,8 +474,17 @@ mod tests {
                             )
                             .await?;
                             assert_eq!(
-                                discovery["result"]["supportedVersions"],
-                                json!(["2026-07-28"]),
+                                discovery["result"],
+                                json!({
+                                    "resultType": "complete",
+                                    "ttlMs": 0,
+                                    "cacheScope": "private",
+                                    "supportedVersions": ["2026-07-28"],
+                                    "capabilities": {"tools": {}},
+                                    "_meta": {"io.modelcontextprotocol/serverInfo": {
+                                        "name": "zed-project-files", "version": "1"
+                                    }}
+                                }),
                             );
                             published
                                 .unbounded_send(server_id)
@@ -515,14 +559,22 @@ mod tests {
                     &connection, &server, "read-missing", "tools/call",
                     params(json!({"name": "read_text_file", "arguments": {"path": "missing"}})),
                 ).await?;
-                assert_eq!(
-                    missing_file["error"]["code"], i32::from(Error::resource_not_found(None).code),
-                );
+                assert_eq!(missing_file["result"]["isError"], true);
+                assert_eq!(missing_file["result"]["resultType"], "complete");
+                assert!(missing_file.get("error").is_none());
+                assert!(missing_file["result"]["content"][0]["text"].as_str().expect("tool error").contains("missing"));
+                let past_end = request(
+                    &connection, &server, "past-end", "tools/call",
+                    params(json!({"name": "read_text_file", "arguments": {"path": "past-end"}})),
+                ).await?;
+                assert_eq!(past_end["result"]["isError"], true);
+                assert!(past_end.get("error").is_none());
                 for arguments in [
                     json!({"name": "unknown", "arguments": {"path": "other"}}),
                     json!({"name": "read_text_file", "arguments": {}}),
                     json!({"name": "read_text_file", "arguments": {"path": "other", "line": 0}}),
                     json!({"name": "read_text_file", "arguments": {"path": "other", "extra": true}}),
+                    json!({"name": "read_text_file", "arguments": {"path": "invalid-path"}}),
                 ] {
                     let invalid = request(
                         &connection, &server, "invalid", "tools/call", params(arguments),

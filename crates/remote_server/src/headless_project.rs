@@ -8,14 +8,12 @@ use lsp::LanguageServerId;
 
 use extension::ExtensionHostProxy;
 use extension_host::headless_host::HeadlessExtensionStore;
+use file_content::{ByteContent, FILE_ANALYSIS_BYTES, analyze_byte_content};
 use fs::Fs;
 use futures::{channel::oneshot, stream::StreamExt as _};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, PromptLevel, Task, TaskExt};
 use http_client::HttpClient;
-use language::{
-    Buffer, BufferEvent, ByteContent, FILE_ANALYSIS_BYTES, LanguageRegistry, analyze_byte_content,
-    proto::serialize_operation,
-};
+use language::{Buffer, BufferEvent, LanguageRegistry, proto::serialize_operation};
 use node_runtime::NodeRuntime;
 use project::{
     AgentRegistryStore, LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment,

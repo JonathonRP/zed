@@ -34,6 +34,7 @@ debug_adapter_extension.workspace = true
 env_logger.workspace = true
 extension.workspace = true
 extension_host.workspace = true
+file_content.workspace = true
 fs.workspace = true
 futures.workspace = true
 git.workspace = true

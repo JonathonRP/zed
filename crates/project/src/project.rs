@@ -76,6 +76,7 @@ use debugger::{
 
 pub use environment::ProjectEnvironment;
 
+use file_content::{ByteContent, FILE_ANALYSIS_BYTES, analyze_byte_content};
 use futures::{
     StreamExt,
     channel::mpsc::{self, UnboundedReceiver},
@@ -90,10 +91,10 @@ use gpui::{
     Task, TaskExt, WeakEntity, Window,
 };
 use language::{
-    Buffer, BufferEditSource, BufferEvent, ByteContent, Capability, CodeLabel, CursorShape,
-    DiskState, FILE_ANALYSIS_BYTES, Language, LanguageName, LanguageRegistry, PointUtf16, ToOffset,
-    ToPointUtf16, Toolchain, ToolchainMetadata, ToolchainScope, Transaction, Unclipped,
-    analyze_byte_content, language_settings::InlayHintKind, proto::split_operations,
+    Buffer, BufferEditSource, BufferEvent, Capability, CodeLabel, CursorShape, DiskState, Language,
+    LanguageName, LanguageRegistry, PointUtf16, ToOffset, ToPointUtf16, Toolchain,
+    ToolchainMetadata, ToolchainScope, Transaction, Unclipped, language_settings::InlayHintKind,
+    proto::split_operations,
 };
 use lsp::{
     CodeActionKind, CompletionContext, CompletionItemKind, DocumentHighlightKind, InsertTextMode,

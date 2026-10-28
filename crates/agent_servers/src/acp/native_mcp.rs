@@ -1,69 +1,213 @@
-use super::{ClientContext, ForegroundWork, ForegroundWorkItem, session_thread};
-use acp_thread::AcpThread;
-mod service;
-
+use super::{AcpSession, ClientContext, ForegroundWork, ForegroundWorkItem};
+use acp_thread::{AcpThread, AgentConnection};
+use action_log::ActionLog;
 use agent_client_protocol::{
     Agent, Error,
     mcp_server::{McpRequestContext, McpServer},
     schema::v2 as acp,
 };
+use collections::HashMap;
 use futures::{
     FutureExt as _,
     channel::{mpsc, oneshot},
 };
-use gpui::{App, AsyncApp, Entity, EntityId};
-use service::ReadTextFile;
-use std::sync::{Arc, Mutex};
+use gpui::{App, AppContext as _, AsyncApp, Entity, EntityId, WeakEntity};
+use project::Project;
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
+use util::path_list::PathList;
 
+mod service;
 pub(super) use service::registration_guard;
+use service::{ReadError, ReadTextFile};
 
-#[derive(Clone, Default)]
-pub(super) struct SessionBinding(Arc<Mutex<Option<(acp::SessionId, EntityId)>>>);
+#[derive(Clone)]
+enum Owner {
+    Pending(WeakEntity<AcpThread>),
+    Bound {
+        session_id: acp::SessionId,
+        thread: WeakEntity<AcpThread>,
+    },
+    Closed,
+}
+
+#[derive(Clone)]
+struct SessionBinding {
+    project: EntityId,
+    owner: Arc<Mutex<Owner>>,
+}
 
 impl SessionBinding {
-    pub(super) fn bind(&self, thread: &Entity<AcpThread>, cx: &App) {
-        *self.0.lock().unwrap_or_else(|error| error.into_inner()) =
-            Some((thread.read(cx).session_id().clone(), thread.entity_id()));
+    fn thread(
+        &self,
+        sessions: &RefCell<HashMap<acp::SessionId, AcpSession>>,
+        cx: &App,
+    ) -> Result<Entity<AcpThread>, Error> {
+        let owner = self
+            .owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let thread = match owner {
+            Owner::Pending(thread) => thread,
+            Owner::Bound { session_id, thread } => {
+                if !sessions
+                    .borrow()
+                    .get(&session_id)
+                    .is_some_and(|session| session.thread.entity_id() == thread.entity_id())
+                {
+                    return Err(
+                        Error::internal_error().data("Zed session owner was released or replaced")
+                    );
+                }
+                thread
+            }
+            Owner::Closed => return Err(Error::request_cancelled()),
+        };
+        let thread = thread.upgrade().ok_or_else(Error::request_cancelled)?;
+        if thread.read(cx).project().entity_id() != self.project
+            || thread.read(cx).is_observation_closed()
+        {
+            return Err(Error::request_cancelled());
+        }
+        Ok(thread)
     }
+}
+
+pub(super) struct PendingSession {
+    thread: Entity<AcpThread>,
+    binding: SessionBinding,
+}
+
+impl PendingSession {
+    pub(super) fn action_log(&self, cx: &App) -> Entity<ActionLog> {
+        self.thread.read(cx).action_log().clone()
+    }
+
+    pub(super) fn bind(&self, thread: &Entity<AcpThread>, cx: &App) -> Result<(), Error> {
+        if thread.read(cx).project().entity_id() != self.binding.project {
+            return Err(
+                Error::internal_error().data("Native MCP registration belongs to another project")
+            );
+        }
+        let mut owner = self
+            .binding
+            .owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !matches!(&*owner, Owner::Pending(thread) if thread.entity_id() == self.thread.entity_id())
+        {
+            return Err(
+                Error::internal_error().data("Native MCP registration is no longer pending")
+            );
+        }
+        *owner = Owner::Bound {
+            session_id: thread.read(cx).session_id().clone(),
+            thread: thread.downgrade(),
+        };
+        Ok(())
+    }
+}
+
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        let mut owner = self
+            .binding
+            .owner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if matches!(&*owner, Owner::Pending(_)) {
+            *owner = Owner::Closed;
+        }
+    }
+}
+
+pub(super) fn pending_server(
+    dispatch: mpsc::UnboundedSender<ForegroundWork>,
+    connection: Rc<dyn AgentConnection>,
+    project: Entity<Project>,
+    work_dirs: PathList,
+    cx: &mut App,
+) -> (McpServer<Agent>, PendingSession) {
+    let action_log = cx.new(|_| ActionLog::new(project.clone()));
+    // This private reader is never registered as an ACP session. It gives setup
+    // calls the established buffer reader before the agent chooses a session ID.
+    let thread = cx.new(|cx| {
+        AcpThread::new(
+            None,
+            None,
+            Some(work_dirs),
+            connection,
+            project.clone(),
+            action_log,
+            acp::SessionId::new(format!("zed-mcp-setup:{}", uuid::Uuid::new_v4())),
+            watch::Receiver::constant(Default::default()),
+            cx,
+        )
+    });
+    let binding = SessionBinding {
+        project: project.entity_id(),
+        owner: Arc::new(Mutex::new(Owner::Pending(thread.downgrade()))),
+    };
+    (
+        service_server(dispatch, binding.clone()),
+        PendingSession { thread, binding },
+    )
 }
 
 pub(super) fn server(
     dispatch: mpsc::UnboundedSender<ForegroundWork>,
-) -> (McpServer<Agent>, SessionBinding) {
-    let binding = SessionBinding::default();
-    (
-        service::server({
-            let binding = binding.clone();
-            move |arguments, context| {
-                let binding = binding.clone();
-                let dispatch = dispatch.clone();
-                async move {
-                    let (result, received) = oneshot::channel();
-                    let work: ForegroundWork = Box::new(ReadWork {
-                        binding,
-                        arguments,
-                        context,
-                        result,
-                    });
-                    if let Err(error) = dispatch.unbounded_send(work) {
-                        error.into_inner().reject();
-                    }
-                    received.await.map_err(|_| {
-                        Error::internal_error().data("Zed file reader stopped before cleanup")
-                    })?
-                }
-                .boxed()
-            }
-        }),
-        binding,
+    thread: &Entity<AcpThread>,
+    cx: &App,
+) -> McpServer<Agent> {
+    service_server(
+        dispatch,
+        SessionBinding {
+            project: thread.read(cx).project().entity_id(),
+            owner: Arc::new(Mutex::new(Owner::Bound {
+                session_id: thread.read(cx).session_id().clone(),
+                thread: thread.downgrade(),
+            })),
+        },
     )
+}
+
+fn service_server(
+    dispatch: mpsc::UnboundedSender<ForegroundWork>,
+    binding: SessionBinding,
+) -> McpServer<Agent> {
+    service::server(move |arguments, context| {
+        let binding = binding.clone();
+        let dispatch = dispatch.clone();
+        async move {
+            let (result, received) = oneshot::channel();
+            let work: ForegroundWork = Box::new(ReadWork {
+                binding,
+                arguments,
+                context,
+                result,
+            });
+            if let Err(error) = dispatch.unbounded_send(work) {
+                error.into_inner().reject();
+            }
+            received.await.map_err(|_| {
+                ReadError::from(
+                    Error::internal_error().data("Zed file reader stopped before cleanup"),
+                )
+            })?
+        }
+        .boxed()
+    })
 }
 
 struct ReadWork {
     binding: SessionBinding,
     arguments: ReadTextFile,
     context: McpRequestContext<Agent>,
-    result: oneshot::Sender<Result<String, Error>>,
+    result: oneshot::Sender<Result<String, ReadError>>,
 }
 
 impl ForegroundWorkItem for ReadWork {
@@ -74,56 +218,49 @@ impl ForegroundWorkItem for ReadWork {
             context: request,
             result,
         } = *self;
-        let read = (|| {
+        let sessions = context.sessions.clone();
+        let read = cx.update(|cx| {
             if request.operation_cancellation().is_cancelled() {
-                return Err(Error::request_cancelled());
+                return Err(Error::request_cancelled().into());
             }
-            let (session_id, owner) = binding
-                .0
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone()
-                .ok_or_else(|| Error::internal_error().data("Zed session is not initialized"))?;
-            let thread = session_thread(context, &session_id)?;
-            if thread.entity_id() != owner {
-                return Err(Error::internal_error().data("Zed session owner was replaced"));
+            let thread = binding.thread(&sessions, cx)?;
+            if !thread
+                .read(cx)
+                .project()
+                .read(cx)
+                .path_style(cx)
+                .is_absolute(&arguments.path)
+            {
+                return Err(ReadError::InvalidArguments("path must be absolute".into()));
             }
-            thread
-                .update(cx, |thread, cx| {
-                    if thread.is_observation_closed() {
-                        return Err(Error::request_cancelled());
-                    }
-                    if !thread
-                        .project()
-                        .read(cx)
-                        .path_style(cx)
-                        .is_absolute(&arguments.path)
-                    {
-                        return Err(Error::invalid_params().data("path must be absolute"));
-                    }
-                    Ok(thread.read_text_file(
-                        arguments.path,
-                        arguments.line,
-                        arguments.limit,
-                        false,
-                        cx,
-                    ))
-                })
-                .map_err(Error::from)?
-        })();
-        cx.spawn(async move |_cx| {
+            let read = thread.update(cx, |thread, cx| {
+                thread.read_text_file(arguments.path, arguments.line, arguments.limit, false, cx)
+            });
+            Ok((thread, read))
+        });
+        cx.spawn(async move |cx| {
             let output = match read {
-                Ok(read) => {
+                Ok((thread, read)) => {
                     let cancellation = request.operation_cancellation().cancelled();
-                    futures::pin_mut!(read, cancellation);
-                    match futures::future::select(read, cancellation).await {
-                        futures::future::Either::Left((result, _)) => result,
-                        futures::future::Either::Right(_) => Err(Error::request_cancelled()),
-                    }
+                    let output = {
+                        futures::pin_mut!(read, cancellation);
+                        match futures::future::select(read, cancellation).await {
+                            futures::future::Either::Left((result, _)) => {
+                                result.map_err(ReadError::from)
+                            }
+                            futures::future::Either::Right(_) => {
+                                Err(Error::request_cancelled().into())
+                            }
+                        }
+                    };
+                    // A read may span setup binding, view release or owner replacement.
+                    // Retaining its reader must not retain the registration's authority.
+                    let authority = cx.update(|cx| binding.thread(&sessions, cx).map(|_| ()));
+                    drop(thread);
+                    authority.map_err(ReadError::from).and(output)
                 }
                 Err(error) => Err(error),
             };
-            // A cancellation response is not complete until the foreground read task is dropped.
             if result.send(output).is_err() {
                 log::debug!("Native MCP file reader lost its result observer");
             }
@@ -134,9 +271,9 @@ impl ForegroundWorkItem for ReadWork {
     fn reject(self: Box<Self>) {
         if self
             .result
-            .send(Err(
-                Error::internal_error().data("ACP foreground dispatch queue closed")
-            ))
+            .send(Err(Error::internal_error()
+                .data("ACP foreground dispatch queue closed")
+                .into()))
             .is_err()
         {
             log::debug!("Native MCP file reader closed without an observer");

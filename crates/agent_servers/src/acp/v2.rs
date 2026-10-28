@@ -702,6 +702,7 @@ impl AcpV2Connection {
         project: Entity<Project>,
         context: SessionContext,
         title: Option<SharedString>,
+        action_log: Option<Entity<ActionLog>>,
         cx: &mut App,
     ) -> Result<Entity<AcpThread>> {
         anyhow::ensure!(
@@ -718,7 +719,7 @@ impl AcpV2Connection {
             .clone()
             .unwrap_or_default();
         let project_entity_id = project.entity_id();
-        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let action_log = action_log.unwrap_or_else(|| cx.new(|_| ActionLog::new(project.clone())));
         let thread = cx.new(|cx| {
             AcpThread::new(
                 None,
@@ -993,7 +994,8 @@ impl AcpV2Connection {
             request = request.replay_from(acp::ReplayFrom::Start(acp::ReplayFromStart::new()));
         }
         let thread =
-            match self.create_session_thread(session_id.clone(), project, context, title, cx) {
+            match self.create_session_thread(session_id.clone(), project, context, title, None, cx)
+            {
                 Ok(thread) => thread,
                 Err(error) => return Task::ready(Err(error)),
             };
@@ -1003,8 +1005,7 @@ impl AcpV2Connection {
                 Ok(registration) => registration,
                 Err(error) => return Task::ready(Err(map_acp_error(error))),
             };
-            let (server, binding) = super::native_mcp::server(self.dispatch_tx.clone());
-            binding.bind(&thread, cx);
+            let server = super::native_mcp::server(self.dispatch_tx.clone(), &thread, cx);
             let builder = match self
                 .connection
                 .resume_session_from(request)
@@ -1261,19 +1262,19 @@ impl AcpV2Connection {
             }
         });
         let dispatch_tx = dispatch_tx.clone();
+        let guard = util::defer({
+            let dispatch_tx = dispatch_tx.clone();
+            let request_id = request_id.clone();
+            move || {
+                cancellation.cancel().log_err();
+                enqueue_notification(&dispatch_tx, request_id, cancel_request_elicitations);
+            }
+        });
         let response = async move {
             if let Err(error) = published {
                 enqueue_notification(&dispatch_tx, request_id, cancel_request_elicitations);
                 return Err(map_acp_error(error));
             }
-            let guard = util::defer({
-                let dispatch_tx = dispatch_tx.clone();
-                let request_id = request_id.clone();
-                move || {
-                    cancellation.cancel().log_err();
-                    enqueue_notification(&dispatch_tx, request_id, cancel_request_elicitations);
-                }
-            });
             let response = received.await.context(ResponseCallbackDropped)?;
             guard.abort();
             response.map_err(map_acp_error)
@@ -1372,7 +1373,13 @@ impl AgentConnection for AcpV2Connection {
             let creation =
                 acp::RequestId::Str(format!("native-mcp:{}", uuid::Uuid::new_v4()).into());
             enqueue_notification(&self.dispatch_tx, creation.clone(), begin_session_creation);
-            let (server, binding) = super::native_mcp::server(self.dispatch_tx.clone());
+            let (server, binding) = super::native_mcp::pending_server(
+                self.dispatch_tx.clone(),
+                self.clone(),
+                project.clone(),
+                context.work_dirs(),
+                cx,
+            );
             let builder = match self
                 .connection
                 .build_session_from(request)
@@ -1448,15 +1455,19 @@ impl AgentConnection for AcpV2Connection {
                         }
                     };
                     let thread = cx.update(|cx| {
+                        let action_log = native_binding
+                            .as_ref()
+                            .map(|binding| binding.action_log(cx));
                         let thread = this.create_session_thread(
                             session_id.clone(),
                             project,
                             context,
                             None,
+                            action_log,
                             cx,
                         )?;
                         if let Some(binding) = native_binding {
-                            binding.bind(&thread, cx);
+                            binding.bind(&thread, cx).map_err(map_acp_error)?;
                         }
                         Ok::<_, anyhow::Error>(thread)
                     })?;
@@ -2431,6 +2442,13 @@ mod tests {
         acp::AgentCapabilities::new().session(acp::SessionCapabilities::new())
     }
 
+    fn native_mcp_capabilities() -> acp::AgentCapabilities {
+        acp::AgentCapabilities::new().session(
+            acp::SessionCapabilities::new()
+                .mcp(acp::McpCapabilities::new().acp(acp::McpAcpCapabilities::new())),
+        )
+    }
+
     fn native_mcp_params(
         arguments: serde_json::Value,
     ) -> serde_json::Map<String, serde_json::Value> {
@@ -2518,8 +2536,17 @@ mod tests {
         )
         .await;
         assert_eq!(
-            discovery["result"]["supportedVersions"],
-            json!(["2026-07-28"])
+            discovery["result"],
+            json!({
+                "resultType": "complete",
+                "ttlMs": 0,
+                "cacheScope": "private",
+                "supportedVersions": ["2026-07-28"],
+                "capabilities": {"tools": {}},
+                "_meta": {"io.modelcontextprotocol/serverInfo": {
+                    "name": "zed-project-files", "version": "1"
+                }}
+            })
         );
         assert!(discovery["result"]["capabilities"]["tools"].is_object());
         let tools = native_mcp_request(
@@ -2534,36 +2561,6 @@ mod tests {
         assert_eq!(tools["result"]["tools"][0]["name"], "read_text_file");
         assert_eq!(tools["result"]["resultType"], "complete");
         assert_eq!(tools["result"]["cacheScope"], "private");
-        let uninitialized = native_mcp_request(
-            &harness,
-            &server_id,
-            "uninitialized",
-            "tools/call",
-            native_mcp_params(json!({
-                "name": "read_text_file", "arguments": {"path": session_path("a/file.txt")}
-            })),
-            cx,
-        )
-        .await;
-        assert!(uninitialized["error"].is_object());
-
-        responder
-            .respond(initial_response())
-            .expect("session established");
-        let thread = bounded(creation, cx).await.expect("native session");
-        let read = native_mcp_request(
-            &harness,
-            &server_id,
-            "read",
-            "tools/call",
-            native_mcp_params(json!({
-                "name": "read_text_file",
-                "arguments": {"path": session_path("a/file.txt"), "line": 2, "limit": 1}
-            })),
-            cx,
-        )
-        .await;
-        assert_eq!(read["result"]["content"][0]["text"], "second\n");
         let buffer = cx.update(|cx| {
             harness.project.update(cx, |project, cx| {
                 let path = project
@@ -2578,6 +2575,53 @@ mod tests {
                 buffer.edit([(0..5, "unsaved".to_owned())], None, cx);
             });
         });
+        let eager = native_mcp_request(
+            &harness,
+            &server_id,
+            "eager-read-before-session-id",
+            "tools/call",
+            native_mcp_params(json!({
+                "name": "read_text_file", "arguments": {"path": session_path("a/file.txt")}
+            })),
+            cx,
+        )
+        .await;
+        assert_eq!(eager["result"]["isError"], false);
+        assert_eq!(
+            eager["result"]["content"][0]["text"],
+            "unsaved\nsecond\nthird\n"
+        );
+        assert!(
+            (&mut creation).now_or_never().is_none(),
+            "read cannot depend on the session/new response"
+        );
+
+        responder
+            .respond(initial_response())
+            .expect("session established");
+        let thread = bounded(creation, cx).await.expect("native session");
+        thread.read_with(cx, |thread, cx| {
+            assert!(
+                thread
+                    .action_log()
+                    .read(cx)
+                    .file_read_time(&session_path("a/file.txt"))
+                    .is_some()
+            );
+        });
+        let read = native_mcp_request(
+            &harness,
+            &server_id,
+            "read",
+            "tools/call",
+            native_mcp_params(json!({
+                "name": "read_text_file",
+                "arguments": {"path": session_path("a/file.txt"), "line": 2, "limit": 1}
+            })),
+            cx,
+        )
+        .await;
+        assert_eq!(read["result"]["content"][0]["text"], "second\n");
         let unsaved = native_mcp_request(
             &harness,
             &server_id,
@@ -2598,6 +2642,7 @@ mod tests {
             session_path("a/missing.txt"),
             std::path::PathBuf::from("file.txt"),
         ] {
+            let relative = path.is_relative();
             let rejected = native_mcp_request(
                 &harness,
                 &server_id,
@@ -2607,9 +2652,22 @@ mod tests {
                 cx,
             )
             .await;
-            assert!(rejected["error"]["code"].is_number());
-            assert!(rejected.get("result").is_none());
+            if relative {
+                assert_eq!(rejected["error"]["code"], -32602);
+                assert!(rejected.get("result").is_none());
+            } else {
+                assert_eq!(rejected["result"]["isError"], true);
+                assert!(rejected.get("error").is_none());
+            }
         }
+        let past_end = native_mcp_request(
+            &harness, &server_id, "past-end", "tools/call",
+            native_mcp_params(json!({
+                "name": "read_text_file", "arguments": {"path": session_path("a/file.txt"), "line": 999}
+            })), cx,
+        ).await;
+        assert_eq!(past_end["result"]["isError"], true);
+        assert!(past_end.get("error").is_none());
         drop(thread);
         cx.run_until_parked();
         let released = native_mcp_request(
@@ -2624,7 +2682,7 @@ mod tests {
         )
         .await;
         assert!(
-            released["error"].is_object(),
+            released["result"]["isError"] == true,
             "a retained route cannot retain read authority"
         );
 
@@ -2657,7 +2715,7 @@ mod tests {
         )
         .await;
         assert!(
-            replaced["error"].is_object(),
+            replaced["result"]["isError"] == true,
             "old routes cannot follow a new owner"
         );
         let replay_read = native_mcp_request(
@@ -2679,6 +2737,224 @@ mod tests {
             .respond(acp::ResumeSessionResponse::new())
             .expect("resume reply");
         let _resumed = bounded(loading, cx).await.expect("resumed");
+    }
+
+    #[gpui::test]
+    async fn v2_native_mcp_sdk_isolates_project_setup_and_registration_ownership(
+        cx: &mut TestAppContext,
+    ) {
+        let harness = SessionHarness::new(native_mcp_capabilities(), vec![], vec![], cx).await;
+        harness
+            .filesystem
+            .insert_file(session_path("a/file.txt"), b"project A".to_vec())
+            .await;
+        harness
+            .filesystem
+            .insert_file(session_path("b/file.txt"), b"project B".to_vec())
+            .await;
+        let other_project = Project::test(
+            harness.filesystem.clone(),
+            [session_path("b").as_path()],
+            cx,
+        )
+        .await;
+        *harness.hold_new_responses.lock().expect("defer setup") = true;
+        let creation_a = cx.update(|cx| {
+            harness.client.clone().new_session(
+                harness.project.clone(),
+                PathList::new(&[session_path("a")]),
+                cx,
+            )
+        });
+        let creation_b = cx.update(|cx| {
+            harness.client.clone().new_session(
+                other_project,
+                PathList::new(&[session_path("b")]),
+                cx,
+            )
+        });
+        let first = bounded(harness.new_replies.recv(), cx)
+            .await
+            .expect("first setup");
+        let second = bounded(harness.new_replies.recv(), cx)
+            .await
+            .expect("second setup");
+        let ((request_a, responder_a), (request_b, responder_b)) =
+            if first.0.cwd == session_path("a") {
+                (first, second)
+            } else {
+                (second, first)
+            };
+        let server_a = native_server_id(&request_a.mcp_servers);
+        let server_b = native_server_id(&request_b.mcp_servers);
+        assert_ne!(server_a, server_b);
+        assert!(
+            harness.client.sessions.borrow().is_empty(),
+            "setup readers are not ACP sessions"
+        );
+        for (server, own_path, other_path, text) in [
+            (
+                &server_a,
+                session_path("a/file.txt"),
+                session_path("b/file.txt"),
+                "project A",
+            ),
+            (
+                &server_b,
+                session_path("b/file.txt"),
+                session_path("a/file.txt"),
+                "project B",
+            ),
+        ] {
+            let own = native_mcp_request(
+                &harness,
+                server,
+                "same-logical-id",
+                "tools/call",
+                native_mcp_params(
+                    json!({"name": "read_text_file", "arguments": {"path": own_path}}),
+                ),
+                cx,
+            )
+            .await;
+            assert_eq!(own["result"]["content"][0]["text"], text);
+            assert_eq!(own["result"]["isError"], false);
+            let denied = native_mcp_request(
+                &harness,
+                server,
+                "same-logical-id",
+                "tools/call",
+                native_mcp_params(
+                    json!({"name": "read_text_file", "arguments": {"path": other_path}}),
+                ),
+                cx,
+            )
+            .await;
+            assert_eq!(denied["result"]["isError"], true);
+            assert!(denied.get("error").is_none());
+        }
+        responder_a
+            .respond(acp::NewSessionResponse::new("project-a"))
+            .expect("A reply");
+        responder_b
+            .respond(acp::NewSessionResponse::new("project-b"))
+            .expect("B reply");
+        let thread_a = bounded(creation_a, cx).await.expect("A owner");
+        let thread_b = bounded(creation_b, cx).await.expect("B owner");
+        cx.update(|cx| {
+            let (_server, pending) = super::super::native_mcp::pending_server(
+                harness.client.dispatch_tx.clone(),
+                harness.client.clone(),
+                harness.project.clone(),
+                PathList::new(&[session_path("a")]),
+                cx,
+            );
+            assert!(
+                pending.bind(&thread_b, cx).is_err(),
+                "a registration cannot bind another project"
+            );
+        });
+        drop(thread_a);
+        cx.run_until_parked();
+        let released = native_mcp_request(&harness, &server_a, "owner", "tools/call",
+            native_mcp_params(json!({"name": "read_text_file", "arguments": {"path": session_path("a/file.txt")}})), cx,
+        ).await;
+        assert_eq!(released["result"]["isError"], true);
+        let retained = native_mcp_request(&harness, &server_b, "owner", "tools/call",
+            native_mcp_params(json!({"name": "read_text_file", "arguments": {"path": session_path("b/file.txt")}})), cx,
+        ).await;
+        assert_eq!(retained["result"]["content"][0]["text"], "project B");
+    }
+
+    #[gpui::test]
+    async fn v2_native_mcp_sdk_dropping_unpolled_setup_cancels_and_retires_scope(
+        cx: &mut TestAppContext,
+    ) {
+        async fn scope_active(
+            harness: &SessionHarness,
+            request_id: acp::RequestId,
+            cx: &TestAppContext,
+        ) -> bool {
+            let (sender, received) = futures::channel::oneshot::channel();
+            enqueue_notification(
+                &harness.client.dispatch_tx,
+                (request_id, sender),
+                |(request_id, sender), _cx, context| {
+                    let active = context
+                        .active_request_scopes
+                        .as_ref()
+                        .is_some_and(|scopes| scopes.borrow().contains(&request_id));
+                    sender.send(active).expect("scope observer");
+                },
+            );
+            bounded(received, cx).await.expect("scope")
+        }
+
+        let harness = SessionHarness::new(native_mcp_capabilities(), vec![], vec![], cx).await;
+        harness
+            .filesystem
+            .insert_file(session_path("a/file.txt"), b"pending".to_vec())
+            .await;
+        *harness.hold_new_responses.lock().expect("defer setup") = true;
+        let creation = cx.update(|cx| {
+            harness.client.clone().new_session(
+                harness.project.clone(),
+                PathList::new(&[session_path("a")]),
+                cx,
+            )
+        });
+        // Drop before yielding to the executor, not just before awaiting the handle.
+        drop(creation);
+        let (_, request_id) = bounded(harness.new_requests.recv(), cx)
+            .await
+            .expect("eager setup");
+        let (request, responder) = bounded(harness.new_replies.recv(), cx)
+            .await
+            .expect("setup responder");
+        let server = native_server_id(&request.mcp_servers);
+        let cancellation = responder.cancellation();
+        bounded(cancellation.cancelled(), cx).await;
+        assert!(!scope_active(&harness, request_id.clone(), cx).await);
+        let input = cx.background_spawn(
+            harness
+                .agent
+                .send_request(acp::CreateElicitationRequest::new(
+                    acp::ElicitationFormMode::new(
+                        acp::ElicitationRequestScope::new(request_id.clone()),
+                        acp::ElicitationSchema::new(),
+                    ),
+                    "Setup input",
+                ))
+                .block_task(),
+        );
+        assert_eq!(
+            bounded(input, cx).await.expect("cancel setup input").action,
+            acp::ElicitationAction::Cancel
+        );
+        assert!(
+            harness
+                .client
+                .request_elicitations
+                .read_with(cx, |store, _| store.elicitations().is_empty())
+        );
+        let denied = native_mcp_request(&harness, &server, "abandoned", "tools/call",
+            native_mcp_params(json!({"name": "read_text_file", "arguments": {"path": session_path("a/file.txt")}})), cx,
+        ).await;
+        assert_eq!(
+            denied["result"]["isError"], true,
+            "unpolled abandonment revokes file authority"
+        );
+        responder
+            .respond(acp::NewSessionResponse::new("late-native"))
+            .expect("late success");
+        assert_eq!(
+            bounded(harness.closes.recv(), cx)
+                .await
+                .expect("close late success"),
+            acp::SessionId::new("late-native")
+        );
+        assert!(harness.client.sessions.borrow().is_empty());
+        assert!(!scope_active(&harness, request_id, cx).await);
     }
 
     #[gpui::test]
