@@ -1,0 +1,191 @@
+name: Supplementary RP v1.25.3 protocol and port validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact immutable product source SHA (not a branch)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rp-v1253-focused-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+env:
+  SOURCE_SHA: ${{ inputs.source_sha }}
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  ZED_HEADLESS: "1"
+
+jobs:
+  focused_linux:
+    if: github.repository == 'JonathonRP/zed' && github.repository_owner == 'JonathonRP'
+    name: Supplementary focused Linux tests (not release authorization)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CC: clang
+      CXX: clang++
+    steps:
+      - name: Validate repository and immutable source input
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "JonathonRP/zed"
+          test "$GITHUB_REPOSITORY_OWNER" = "JonathonRP"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Checkout exact product source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          fetch-tags: false
+          persist-credentials: false
+
+      - name: Record and verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p "$RUNNER_TEMP/rp-port-evidence"
+          {
+            printf 'product_sha=%s\n' "$SOURCE_SHA"
+            printf 'workflow_sha=%s\n' "$GITHUB_SHA"
+            printf 'workflow_ref=%s\n' "$GITHUB_WORKFLOW_REF"
+            git show --no-patch --format='parents=%P%ntree=%T' HEAD
+            echo 'Supplementary only: not owner attestation or the ordinary compatibility check.'
+          } | tee "$RUNNER_TEMP/rp-port-evidence/source.txt" >> "$GITHUB_STEP_SUMMARY"
+          test "$(git hash-object .github/workflows/rp_stable_sync.yml)" = a3423fbb7d1e7aeaaff6be5ecc26d97cc6f8e181
+          test ! -e .github/rp-stable-port-request.json
+          git fetch --no-tags https://github.com/zed-industries/zed.git refs/tags/v1.25.3:refs/tags/v1.25.3
+          python3 script/rp_stable_base.py verify --previous-ref HEAD^1
+
+      - name: Install repository Linux dependencies
+        run: ./script/linux
+
+      - name: Set up Node for repository test fixtures
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Download repository WASI SDK
+        run: ./script/download-wasi-sdk
+
+      - name: RP release guard regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s script -p 'test_rp*.py' 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/rp-python.log"
+
+      - name: ACP connections and negotiated v2 lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --config .cargo/ci-config.toml -p agent_servers --lib acp:: 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/agent-servers.log"
+
+      - name: ACP replay and receipt regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --config .cargo/ci-config.toml -p acp_thread --lib tool_call 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-replay.log"
+          cargo test --locked --config .cargo/ci-config.toml -p acp_thread --lib submission:: 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-submission.log"
+
+      - name: Native MCP tool binding
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --config .cargo/ci-config.toml -p acp_tools --lib 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-tools.log"
+
+      - name: RP updater and isolated release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --config .cargo/ci-config.toml -p release_channel --lib 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/release-channel.log"
+          cargo test --locked --config .cargo/ci-config.toml -p auto_update --lib rp_ 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/auto-update.log"
+
+      - name: RP extension catalog and document colors
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --config .cargo/ci-config.toml -p extension_host --lib rp_extension_catalog 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/catalog.log"
+          cargo test --locked --config .cargo/ci-config.toml -p editor --lib document_color 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/document-colors.log"
+
+      - name: Exact-source remote path preflight and worktree ordering
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --config .cargo/ci-config.toml -p remote_server --lib test_resolve_abs_ 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/remote-paths.log"
+          cargo test --locked --config .cargo/ci-config.toml -p remote_server --lib test_open_remote_buffer_immediately_after_adding_worktree 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/remote-worktree.log"
+
+      - name: Retain immutable source and actual test output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: supplementary-rp-linux-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}/rp-port-evidence/
+          if-no-files-found: warn
+          retention-days: 7
+
+  focused_windows:
+    if: github.repository == 'JonathonRP/zed' && github.repository_owner == 'JonathonRP'
+    name: Supplementary Windows port type check (not an installer)
+    runs-on: windows-2022
+    timeout-minutes: 100
+    steps:
+      - name: Validate repository and immutable source input
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -cne "JonathonRP/zed" -or $env:GITHUB_REPOSITORY_OWNER -cne "JonathonRP") {
+            throw "Unexpected repository"
+          }
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Source must be a lowercase full commit SHA"
+          }
+
+      - name: Checkout exact product source
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 0
+          fetch-tags: false
+          persist-credentials: false
+
+      - name: Verify source and Windows package identity
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD) -cne $env:SOURCE_SHA) { throw "Source SHA mismatch" }
+          New-Item -ItemType Directory -Path "$env:RUNNER_TEMP\rp-port-evidence" -Force | Out-Null
+          @(
+            "product_sha=$env:SOURCE_SHA"
+            "workflow_sha=$env:GITHUB_SHA"
+            "workflow_ref=$env:GITHUB_WORKFLOW_REF"
+            "Supplementary only; no installer build, publication, or owner attestation."
+          ) | Tee-Object -FilePath "$env:RUNNER_TEMP\rp-port-evidence\source.txt" | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          & .\script\test-bundle-windows-identity.ps1
+
+      - name: Type-check port-sensitive Windows source and tests
+        shell: pwsh
+        run: |
+          cargo check --locked --config .cargo/ci-config.toml --tests -p agent_servers -p acp_tools -p auto_update -p extension_host -p editor -p remote_server 2>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP\rp-port-evidence\windows-check.log"
+          if ($LASTEXITCODE -ne 0) { throw "Windows focused cargo check failed" }
+
+      - name: Retain immutable source and type-check output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: supplementary-rp-windows-${{ env.SOURCE_SHA }}
+          path: ${{ runner.temp }}\rp-port-evidence\
+          if-no-files-found: warn
+          retention-days: 7
