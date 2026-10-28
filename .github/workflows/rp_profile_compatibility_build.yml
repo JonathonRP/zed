@@ -106,6 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --config .cargo/ci-config.toml -p acp_tools --lib 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-tools.log"
+          cargo test --locked --config .cargo/ci-config.toml -p feature_flags --lib acp_beta_override_is_user_configurable_without_changing_other_flags 2>&1 | tee "$RUNNER_TEMP/rp-port-evidence/acp-feature-flag.log"
 
       - name: RP updater and isolated release identity
         shell: bash
