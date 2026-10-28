@@ -69,6 +69,24 @@ with `publish_release=false` performs a complete non-publishing rebuild.
 Release runs are never canceled by a newer run, avoiding interruption while an
 immutable release is being created.
 
+Windows packaging preserves all `ZED_RP_*` values across Visual Studio developer
+shell initialization. That shell imports a line-oriented environment and can
+otherwise truncate the JSON manifest and release notes to their first lines.
+Before Cargo runs, packaging checks the restored identity and release-notes
+SHA-256. Before copying the built client into the bundle, it runs
+`zed.exe --verify-rp-release-metadata target/rp-release-metadata` to compare the
+actual embedded manifest, source/version identity, and complete notes with the
+generated files. This command exits without initializing the app, opening a
+profile, or checking for updates.
+
+Run the focused multiline environment and Rust `option_env!` regression with:
+
+```powershell
+pwsh -NoProfile -File script\test-rp-release-metadata.ps1
+```
+
+The Windows packaging identity check also runs this regression.
+
 ## Required evidence
 
 Every release target must be a unique merge on the first-parent history of

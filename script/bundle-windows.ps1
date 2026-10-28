@@ -8,6 +8,7 @@ Param(
 )
 
 . "$PSScriptRoot/lib/workspace.ps1"
+. "$PSScriptRoot/lib/rp-release-metadata.ps1"
 
 # https://stackoverflow.com/questions/57949031/powershell-script-stops-if-program-fails-like-bash-set-o-errexit
 $ErrorActionPreference = 'Stop'
@@ -96,8 +97,11 @@ function Invoke-BundleCargo {
 
 Push-Location
 $requiredRustcWrapper = $env:RUSTC_WRAPPER
-& $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+Invoke-WithRpReleaseMetadata {
+    & $vsDevShell -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+}
 Pop-Location
+Assert-RpReleaseMetadata
 if (-not [string]::IsNullOrWhiteSpace($env:ZED_REQUIRE_SCCACHE)) {
     if ([string]::IsNullOrWhiteSpace($requiredRustcWrapper)) {
         throw "ZED_REQUIRE_SCCACHE requires RUSTC_WRAPPER"
@@ -312,6 +316,16 @@ function BuildZedAndItsFriends {
         $zedBuildArgs += @('--features', ($ZedFeatures -join ','))
     }
     Invoke-BundleCargo -Arguments $zedBuildArgs
+    if ($isRpPackage) {
+        $metadataCheck = Start-Process -FilePath ".\$CargoOutDir\zed.exe" `
+            -ArgumentList @(
+                "--verify-rp-release-metadata",
+                "`"$env:ZED_WORKSPACE\target\rp-release-metadata`""
+            ) -Wait -PassThru
+        if ($metadataCheck.ExitCode -ne 0) {
+            throw "Built RP executable does not contain the expected release metadata"
+        }
+    }
     Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force

@@ -1,5 +1,7 @@
 $ErrorActionPreference = "Stop"
 
+& "$PSScriptRoot\test-rp-release-metadata.ps1"
+
 function Assert-Matches {
     param(
         [string]$Text,
@@ -68,6 +70,14 @@ $bundle = Get-Content -Raw "$root\script\bundle-windows.ps1"
 $installer = Get-Content -Raw "$root\crates\zed\resources\windows\zed.iss"
 $releaseChannel = Get-Content -Raw "$root\crates\release_channel\src\lib.rs"
 $releaseWorkflow = Get-Content -Raw "$root\.github\workflows\fork_stable_release.yml"
+$main = Get-Content -Raw "$root\crates\zed\src\main.rs"
+
+Assert-Matches $bundle '(?s)Invoke-WithRpReleaseMetadata\s*\{.*?& \$vsDevShell.*?\}\s*Pop-Location\s*Assert-RpReleaseMetadata' `
+    "RP metadata must survive developer-shell initialization and be checked before Cargo"
+Assert-Matches $bundle '(?s)Invoke-BundleCargo -Arguments \$zedBuildArgs.*?--verify-rp-release-metadata.*?-Wait -PassThru.*?\$metadataCheck\.ExitCode.*?Copy-Item' `
+    "The built RP executable must verify its embedded metadata before bundling"
+Assert-Matches $main '(?s)let args = Args::parse\(\);.*?verify_rp_release_metadata\(directory\).*?let file_errors = init_paths\(\)' `
+    "Embedded metadata verification must run before initializing any user profile"
 
 $officialBlock = [regex]::Match(
     $bundle,
