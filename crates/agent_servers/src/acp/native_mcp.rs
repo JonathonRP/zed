@@ -268,13 +268,61 @@ impl ForegroundWorkItem for ReadWork {
             {
                 return Err(ReadError::InvalidArguments("path must be absolute".into()));
             }
+            let project = thread.read(cx).project().clone();
+            let project_path = project
+                .read(cx)
+                .project_path_for_absolute_path(&arguments.path, cx)
+                .ok_or_else(|| {
+                    Error::resource_not_found(Some(arguments.path.display().to_string()))
+                })?;
+            let preflight = if project
+                .read(cx)
+                .get_open_buffer(&project_path, cx)
+                .is_some()
+            {
+                None
+            } else {
+                let path = arguments.path.to_str().ok_or_else(|| {
+                    ReadError::InvalidArguments("path must be valid UTF-8".into())
+                })?;
+                Some(project.update(cx, |project, cx| {
+                    project.resolve_abs_text_file_path(path, cx)
+                }))
+            };
             #[cfg(test)]
             let blocked = cx
                 .default_global::<BlockedReads>()
                 .0
                 .remove(&arguments.path);
-            let read = thread.update(cx, |thread, cx| {
-                thread.read_text_file(arguments.path, arguments.line, arguments.limit, false, cx)
+            let read_binding = binding.clone();
+            let read_sessions = sessions.clone();
+            let read = cx.spawn(async move |cx| {
+                // Opening a missing project path creates an empty buffer. Only an
+                // already-open buffer may bypass the existing text-file preflight.
+                if let Some(preflight) = preflight {
+                    if preflight
+                        .await
+                        .map_err(Error::into_internal_error)?
+                        .is_none()
+                    {
+                        return Err(Error::resource_not_found(Some(
+                            arguments.path.display().to_string(),
+                        )));
+                    }
+                }
+                let read = cx.update(|cx| {
+                    let (thread, _) = read_binding.thread(&read_sessions, cx)?;
+                    Ok::<_, Error>(thread.update(cx, |thread, cx| {
+                        thread.read_text_file(
+                            arguments.path,
+                            arguments.line,
+                            arguments.limit,
+                            false,
+                            cx,
+                        )
+                    }))
+                })?;
+                read.await
             });
             #[cfg(test)]
             let read = match blocked {

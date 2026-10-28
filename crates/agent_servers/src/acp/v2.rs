@@ -2512,6 +2512,14 @@ mod tests {
                 b"first\nsecond\nthird\n".to_vec(),
             )
             .await;
+        harness
+            .filesystem
+            .insert_tree(session_path("a/directory"), json!({}))
+            .await;
+        harness
+            .filesystem
+            .insert_file(session_path("a/binary.dat"), b"\0binary".to_vec())
+            .await;
         *harness.hold_new_responses.lock().expect("defer setup") = true;
         let mut creation = cx.update(|cx| {
             harness.client.clone().new_session(
@@ -2640,6 +2648,8 @@ mod tests {
         for path in [
             session_path("b/outside.txt"),
             session_path("a/missing.txt"),
+            session_path("a/directory"),
+            session_path("a/binary.dat"),
             std::path::PathBuf::from("file.txt"),
         ] {
             let relative = path.is_relative();
@@ -2648,18 +2658,58 @@ mod tests {
                 &server_id,
                 "read-error",
                 "tools/call",
-                native_mcp_params(json!({"name": "read_text_file", "arguments": {"path": path}})),
+                native_mcp_params(json!({"name": "read_text_file", "arguments": {"path": &path}})),
                 cx,
             )
             .await;
             if relative {
-                assert_eq!(rejected["error"]["code"], -32602);
+                assert_eq!(rejected["error"]["code"], -32602, "{path:?}: {rejected}");
                 assert!(rejected.get("result").is_none());
             } else {
-                assert_eq!(rejected["result"]["isError"], true);
+                assert_eq!(rejected["result"]["isError"], true, "{path:?}: {rejected}");
                 assert!(rejected.get("error").is_none());
+                cx.update(|cx| {
+                    let project = harness.project.read(cx);
+                    if let Some(project_path) = project.project_path_for_absolute_path(&path, cx) {
+                        assert!(
+                            project.get_open_buffer(&project_path, cx).is_none(),
+                            "rejected read must not create a buffer: {path:?}"
+                        );
+                    }
+                });
             }
         }
+        let new_path = session_path("a/new-unsaved.txt");
+        let new_buffer = cx.update(|cx| {
+            harness.project.update(cx, |project, cx| {
+                let path = project
+                    .project_path_for_absolute_path(&new_path, cx)
+                    .expect("new project buffer path");
+                project.open_buffer(path, cx)
+            })
+        });
+        let new_buffer = bounded(new_buffer, cx).await.expect("new project buffer");
+        cx.update(|cx| {
+            new_buffer.update(cx, |buffer, cx| {
+                buffer.edit([(0..0, "not saved to disk".to_owned())], None, cx);
+            });
+        });
+        let new_unsaved = native_mcp_request(
+            &harness,
+            &server_id,
+            "new-unsaved-buffer",
+            "tools/call",
+            native_mcp_params(json!({
+                "name": "read_text_file", "arguments": {"path": new_path}
+            })),
+            cx,
+        )
+        .await;
+        assert_eq!(new_unsaved["result"]["isError"], false);
+        assert_eq!(
+            new_unsaved["result"]["content"][0]["text"],
+            "not saved to disk"
+        );
         let past_end = native_mcp_request(
             &harness, &server_id, "past-end", "tools/call",
             native_mcp_params(json!({
