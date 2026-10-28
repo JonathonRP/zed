@@ -2867,6 +2867,83 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn v2_native_mcp_sdk_blocked_read_does_not_retain_session_owner(cx: &mut TestAppContext) {
+        let harness = SessionHarness::new(native_mcp_capabilities(), vec![], vec![], cx).await;
+        let path = session_path("a/file.txt");
+        harness
+            .filesystem
+            .insert_file(&path, b"private file contents".to_vec())
+            .await;
+        *harness.hold_new_responses.lock().expect("defer setup") = true;
+        let mut creation = cx.update(|cx| {
+            harness.client.clone().new_session(
+                harness.project.clone(),
+                PathList::new(&[session_path("a")]),
+                cx,
+            )
+        });
+        let (request, _) = harness.new_request(&mut creation, cx).await;
+        let server = native_server_id(&request.mcp_servers);
+        let (_, responder) = bounded(harness.new_replies.recv(), cx)
+            .await
+            .expect("setup responder");
+        responder
+            .respond(initial_response())
+            .expect("session established");
+        let thread = bounded(creation, cx).await.expect("native session");
+        let owner = thread.downgrade();
+        let (started, resume) =
+            cx.update(|cx| super::super::native_mcp::block_next_read(path.clone(), cx));
+        let mut blocked = cx.background_spawn(
+            harness
+                .agent
+                .send_request(
+                    acp::MessageMcpRequest::new(server.clone(), "blocked-read", "tools/call")
+                        .params(native_mcp_params(json!({
+                            "name": "read_text_file", "arguments": {"path": path}
+                        }))),
+                )
+                .block_task(),
+        );
+        bounded(started, cx)
+            .await
+            .expect("reader reached completion gate");
+        assert!((&mut blocked).now_or_never().is_none());
+        drop(thread);
+        cx.run_until_parked();
+        assert!(
+            owner.upgrade().is_none(),
+            "an in-flight read must not retain the last real session owner"
+        );
+        assert!(harness.client.sessions.borrow().is_empty());
+        let rejected = native_mcp_request(
+            &harness,
+            &server,
+            "released-owner",
+            "tools/call",
+            native_mcp_params(json!({
+                "name": "read_text_file", "arguments": {"path": path}
+            })),
+            cx,
+        )
+        .await;
+        assert_eq!(rejected["result"]["isError"], true);
+        assert!(rejected.get("error").is_none());
+        assert!((&mut blocked).now_or_never().is_none());
+        resume.send(()).expect("resume blocked reader");
+        let result = bounded(blocked, cx).await.expect("inner MCP outcome");
+        let result = serde_json::to_value(result).expect("MCP outcome");
+        assert_eq!(result["result"]["isError"], true);
+        assert!(result.get("error").is_none());
+        assert!(
+            !result["result"]["content"][0]["text"]
+                .as_str()
+                .expect("tool execution error")
+                .contains("private file contents")
+        );
+    }
+
+    #[gpui::test]
     async fn v2_native_mcp_sdk_dropping_unpolled_setup_cancels_and_retires_scope(
         cx: &mut TestAppContext,
     ) {
@@ -2927,10 +3004,10 @@ mod tests {
                 ))
                 .block_task(),
         );
-        assert_eq!(
-            bounded(input, cx).await.expect("cancel setup input").action,
-            acp::ElicitationAction::Cancel
-        );
+        let error = bounded(input, cx)
+            .await
+            .expect_err("retired setup scope must reject elicitation");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
         assert!(
             harness
                 .client

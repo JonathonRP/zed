@@ -45,14 +45,14 @@ impl SessionBinding {
         &self,
         sessions: &RefCell<HashMap<acp::SessionId, AcpSession>>,
         cx: &App,
-    ) -> Result<Entity<AcpThread>, Error> {
+    ) -> Result<(Entity<AcpThread>, bool), Error> {
         let owner = self
             .owner
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone();
-        let thread = match owner {
-            Owner::Pending(thread) => thread,
+        let (thread, pending) = match owner {
+            Owner::Pending(thread) => (thread, true),
             Owner::Bound { session_id, thread } => {
                 if !sessions
                     .borrow()
@@ -63,7 +63,7 @@ impl SessionBinding {
                         Error::internal_error().data("Zed session owner was released or replaced")
                     );
                 }
-                thread
+                (thread, false)
             }
             Owner::Closed => return Err(Error::request_cancelled()),
         };
@@ -73,7 +73,7 @@ impl SessionBinding {
         {
             return Err(Error::request_cancelled());
         }
-        Ok(thread)
+        Ok((thread, pending))
     }
 }
 
@@ -210,6 +210,41 @@ struct ReadWork {
     result: oneshot::Sender<Result<String, ReadError>>,
 }
 
+#[cfg(test)]
+#[derive(Default)]
+struct BlockedReads(HashMap<std::path::PathBuf, BlockedRead>);
+
+#[cfg(test)]
+struct BlockedRead {
+    started: oneshot::Sender<()>,
+    resume: oneshot::Receiver<()>,
+}
+
+#[cfg(test)]
+impl gpui::Global for BlockedReads {}
+
+#[cfg(test)]
+pub(super) fn block_next_read(
+    path: std::path::PathBuf,
+    cx: &mut App,
+) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+    let (started, observed) = oneshot::channel();
+    let (resume, resumed) = oneshot::channel();
+    assert!(
+        cx.default_global::<BlockedReads>()
+            .0
+            .insert(
+                path,
+                BlockedRead {
+                    started,
+                    resume: resumed
+                }
+            )
+            .is_none()
+    );
+    (observed, resume)
+}
+
 impl ForegroundWorkItem for ReadWork {
     fn run(self: Box<Self>, cx: &mut AsyncApp, context: &ClientContext) {
         let Self {
@@ -223,7 +258,7 @@ impl ForegroundWorkItem for ReadWork {
             if request.operation_cancellation().is_cancelled() {
                 return Err(Error::request_cancelled().into());
             }
-            let thread = binding.thread(&sessions, cx)?;
+            let (thread, pending) = binding.thread(&sessions, cx)?;
             if !thread
                 .read(cx)
                 .project()
@@ -233,14 +268,33 @@ impl ForegroundWorkItem for ReadWork {
             {
                 return Err(ReadError::InvalidArguments("path must be absolute".into()));
             }
+            #[cfg(test)]
+            let blocked = cx
+                .default_global::<BlockedReads>()
+                .0
+                .remove(&arguments.path);
             let read = thread.update(cx, |thread, cx| {
                 thread.read_text_file(arguments.path, arguments.line, arguments.limit, false, cx)
             });
-            Ok((thread, read))
+            #[cfg(test)]
+            let read = match blocked {
+                Some(blocked) => cx.spawn(async move |_| {
+                    blocked
+                        .started
+                        .send(())
+                        .map_err(|_| Error::internal_error())?;
+                    blocked.resume.await.map_err(Error::into_internal_error)?;
+                    read.await
+                }),
+                None => read,
+            };
+            // Only private setup readers may be retained. Keeping a real owner
+            // alive here would suppress its release callback during the read.
+            Ok((pending.then_some(thread), read))
         });
         cx.spawn(async move |cx| {
             let output = match read {
-                Ok((thread, read)) => {
+                Ok((pending_reader, read)) => {
                     let cancellation = request.operation_cancellation().cancelled();
                     let output = {
                         futures::pin_mut!(read, cancellation);
@@ -256,7 +310,7 @@ impl ForegroundWorkItem for ReadWork {
                     // A read may span setup binding, view release or owner replacement.
                     // Retaining its reader must not retain the registration's authority.
                     let authority = cx.update(|cx| binding.thread(&sessions, cx).map(|_| ()));
-                    drop(thread);
+                    drop(pending_reader);
                     authority.map_err(ReadError::from).and(output)
                 }
                 Err(error) => Err(error),
