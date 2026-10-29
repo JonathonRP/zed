@@ -19,6 +19,7 @@ from rp_stable_base import BASE_PATH, StableBaseError, verify_base
 
 
 CALENDAR_TAG = re.compile(r"^rp-stable-(?P<date>[0-9]{8})\.(?P<patch>[1-9][0-9]*)$")
+CALENDAR_POLICY_PATH = pathlib.Path(".github/rp-release-calendar.json")
 
 
 class MetadataError(RuntimeError):
@@ -55,6 +56,37 @@ def release_asset_names(version: str) -> dict[str, str]:
     }
 
 
+def parse_calendar_version(version: str) -> tuple[str, int]:
+    match = CALENDAR_TAG.fullmatch(f"rp-stable-{version}")
+    if match is None:
+        raise MetadataError(f"invalid RP calendar version {version!r}")
+    date = match["date"]
+    try:
+        datetime.date(int(date[:4]), int(date[4:6]), int(date[6:]))
+    except ValueError as error:
+        raise MetadataError(f"invalid RP calendar date {date!r}") from error
+    patch = int(match["patch"])
+    if patch > 2**32 - 1:
+        raise MetadataError(f"RP calendar patch exceeds the client limit: {version}")
+    return date, patch
+
+
+def read_calendar_floor(repo: pathlib.Path, product_commit: str) -> str:
+    source = f"{product_commit}:{CALENDAR_POLICY_PATH.as_posix()}"
+    policy = json.loads(run_git(repo, "show", source))
+    if (
+        not isinstance(policy, dict)
+        or set(policy) != {"schema_version", "minimum_exclusive"}
+        or type(policy["schema_version"]) is not int
+        or policy["schema_version"] != 1
+        or not isinstance(policy["minimum_exclusive"], str)
+    ):
+        raise MetadataError(f"{source} is not an RP calendar policy version 1")
+    floor = policy["minimum_exclusive"]
+    parse_calendar_version(floor)
+    return floor
+
+
 def parse_calendar_tags(tags: Iterable[tuple[str, str]]) -> list[CalendarTag]:
     parsed: list[CalendarTag] = []
     versions: dict[str, str] = {}
@@ -64,7 +96,8 @@ def parse_calendar_tags(tags: Iterable[tuple[str, str]]) -> list[CalendarTag]:
         if match is None:
             continue
 
-        version = f"{match['date']}.{int(match['patch'])}"
+        date, patch = parse_calendar_version(f"{match['date']}.{match['patch']}")
+        version = f"{date}.{patch}"
         existing_commit = versions.get(version)
         if existing_commit is not None and existing_commit != commit:
             raise MetadataError(
@@ -76,8 +109,8 @@ def parse_calendar_tags(tags: Iterable[tuple[str, str]]) -> list[CalendarTag]:
             CalendarTag(
                 name=name,
                 version=version,
-                date=match["date"],
-                patch=int(match["patch"]),
+                date=date,
+                patch=patch,
                 commit=commit,
             )
         )
@@ -86,8 +119,17 @@ def parse_calendar_tags(tags: Iterable[tuple[str, str]]) -> list[CalendarTag]:
 
 
 def allocate_calendar_version(
-    current_commit: str, utc_date: str, tags: Iterable[tuple[str, str]]
+    current_commit: str,
+    utc_date: str,
+    tags: Iterable[tuple[str, str]],
+    minimum_exclusive: str | None = None,
 ) -> Allocation:
+    parse_calendar_version(f"{utc_date}.1")
+    floor = (
+        parse_calendar_version(minimum_exclusive)
+        if minimum_exclusive is not None
+        else None
+    )
     calendar_tags = parse_calendar_tags(tags)
     current_versions = {
         tag.version for tag in calendar_tags if tag.commit == current_commit
@@ -99,13 +141,27 @@ def allocate_calendar_version(
         )
     if current_versions:
         version = current_versions.pop()
+        if floor is not None and parse_calendar_version(version) <= floor:
+            raise MetadataError(
+                f"immutable RP version {version} is not newer than the installed "
+                f"calendar floor {minimum_exclusive}; use a new reviewed source"
+            )
         return Allocation(version, f"rp-stable-{version}", True)
 
-    next_patch = (
-        max((tag.patch for tag in calendar_tags if tag.date == utc_date), default=0)
-        + 1
-    )
+    known_dates = [tag.date for tag in calendar_tags]
+    if floor is not None:
+        known_dates.append(floor[0])
+    if any(date > utc_date for date in known_dates):
+        raise MetadataError(
+            f"UTC allocation date {utc_date} predates an existing RP calendar "
+            "identity; refusing to allocate an older release"
+        )
+    patches = [tag.patch for tag in calendar_tags if tag.date == utc_date]
+    if floor is not None and floor[0] == utc_date:
+        patches.append(floor[1])
+    next_patch = max(patches, default=0) + 1
     version = f"{utc_date}.{next_patch}"
+    parse_calendar_version(version)
     if any(tag.version == version for tag in calendar_tags):
         raise MetadataError(f"refusing to allocate colliding calendar version {version}")
     return Allocation(version, f"rp-stable-{version}", False)
@@ -254,7 +310,14 @@ def generate_metadata(
     stable_base = verify_base(repo, repo / BASE_PATH)
     raw_tags = read_tags(repo)
     calendar_tags = parse_calendar_tags(raw_tags)
-    allocation = allocate_calendar_version(current_commit, utc_date, raw_tags)
+    minimum_exclusive = read_calendar_floor(repo, current_commit)
+    allocation = allocate_calendar_version(
+        current_commit, utc_date, raw_tags, minimum_exclusive
+    )
+    print(
+        f"RP calendar {allocation.version} is newer than installed floor "
+        f"{minimum_exclusive}"
+    )
     previous_tag = find_previous_calendar_tag(repo, current_commit, calendar_tags)
     fragments = select_fragments(repo, load_fragment_manifest(repo), previous_tag)
     notes = render_notes(repo, allocation.version, stable_base, current_commit, fragments)
