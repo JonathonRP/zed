@@ -1,4 +1,4 @@
-name: Supplementary RP v1.25.3 protocol and port validation
+name: Supplementary RP v1.26.2 protocol and port validation
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: rp-v1253-focused-${{ inputs.source_sha }}
+  group: rp-v1262-focused-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 env:
@@ -25,6 +25,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
   ZED_HEADLESS: "1"
+  SCCACHE_GHA_ENABLED: "true"
 
 jobs:
   focused_linux:
@@ -68,7 +69,7 @@ jobs:
           } | tee "$RUNNER_TEMP/rp-port-evidence/source.txt" >> "$GITHUB_STEP_SUMMARY"
           test "$(git hash-object .github/workflows/rp_stable_sync.yml)" = a3423fbb7d1e7aeaaff6be5ecc26d97cc6f8e181
           test ! -e .github/rp-stable-port-request.json
-          git fetch --no-tags https://github.com/zed-industries/zed.git refs/tags/v1.25.3:refs/tags/v1.25.3
+          git fetch --no-tags https://github.com/zed-industries/zed.git refs/tags/v1.26.2:refs/tags/v1.26.2
           python3 script/rp_stable_base.py verify --previous-ref HEAD^1
 
       - name: Install repository Linux dependencies
@@ -83,6 +84,19 @@ jobs:
       - name: Download repository WASI SDK
         id: dependencies_ready
         run: ./script/download-wasi-sdk
+
+      - name: Set up existing compiler cache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+        with:
+          disable_annotations: true
+
+      - name: Pin compiler cache wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$SCCACHE_PATH"
+          printf 'RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
+          printf 'CARGO_BUILD_RUSTC_WRAPPER=%s\n' "$SCCACHE_PATH" >> "$GITHUB_ENV"
 
       - name: RP release guard regression tests
         if: ${{ !cancelled() && steps.source_verified.outcome == 'success' && steps.dependencies_ready.outcome == 'success' }}
@@ -224,6 +238,20 @@ jobs:
           ) | Tee-Object -FilePath "$env:RUNNER_TEMP\rp-port-evidence\source.txt" | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
           & .\script\test-bundle-windows-identity.ps1 2>&1 |
             Tee-Object -FilePath "$env:RUNNER_TEMP\rp-port-evidence\windows-metadata-regression.log"
+
+      - name: Set up existing compiler cache
+        uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad
+        with:
+          disable_annotations: true
+
+      - name: Pin compiler cache wrapper
+        shell: pwsh
+        run: |
+          if (-not (Test-Path -LiteralPath $env:SCCACHE_PATH -PathType Leaf)) {
+            throw "sccache path missing"
+          }
+          "RUSTC_WRAPPER=$env:SCCACHE_PATH" | Out-File -Append -FilePath $env:GITHUB_ENV
+          "CARGO_BUILD_RUSTC_WRAPPER=$env:SCCACHE_PATH" | Out-File -Append -FilePath $env:GITHUB_ENV
 
       - name: Type-check port-sensitive Windows source and tests
         if: ${{ !cancelled() && steps.windows_source_verified.outcome == 'success' }}
