@@ -24,6 +24,10 @@ pub struct AcpBetaFeatureFlag;
 impl FeatureFlag for AcpBetaFeatureFlag {
     const NAME: &'static str = "acp-beta";
     type Value = PresenceFlag;
+
+    fn allows_user_override() -> bool {
+        true
+    }
 }
 register_feature_flag!(AcpBetaFeatureFlag);
 

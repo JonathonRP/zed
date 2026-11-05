@@ -8,6 +8,7 @@ use lsp::LanguageServerId;
 
 use extension::ExtensionHostProxy;
 use extension_host::headless_host::HeadlessExtensionStore;
+use file_content::{ByteContent, FILE_ANALYSIS_BYTES, analyze_byte_content};
 use fs::Fs;
 use futures::{channel::oneshot, stream::StreamExt as _};
 use gpui::{App, AppContext as _, AsyncApp, Context, Entity, PromptLevel, Task, TaskExt};
@@ -40,6 +41,7 @@ use smol::process::Child;
 
 use settings::{Settings as _, SettingsLocation, initial_server_settings_content};
 use std::{
+    io::Read as _,
     mem,
     num::NonZeroU64,
     path::{Path, PathBuf},
@@ -672,9 +674,9 @@ impl HeadlessProject {
             }
         });
 
-        // We spawn this asynchronously, so that we can send the response back
-        // *before* `worktree_store.add()` can send out UpdateProject requests
-        // to the client about the new worktree.
+        // Add the worktree immediately so a subsequent OpenBufferByPath request
+        // cannot overtake it. Defer only the UpdateProject notification so the
+        // AddWorktree response still reaches the client first.
         //
         // That lets the client manage the reference/handles of the newly-added
         // worktree, before getting interrupted by an UpdateProject request.
@@ -684,10 +686,15 @@ impl HeadlessProject {
         // and immediately dropping the reference of the new client, causing it
         // to be dropped on the headless project, and the client only then
         // receiving a response to AddWorktree.
+        this.update(&mut cx, |this, cx| {
+            this.worktree_store.update(cx, |worktree_store, cx| {
+                worktree_store.add_without_sending_project_updates(&worktree, cx);
+            });
+        });
         cx.spawn(async move |cx| {
             this.update(cx, |this, cx| {
                 this.worktree_store.update(cx, |worktree_store, cx| {
-                    worktree_store.add(&worktree, cx);
+                    worktree_store.send_project_updates(cx)
                 });
             });
         })
@@ -1341,11 +1348,38 @@ impl HeadlessProject {
         } else {
             expanded.to_string_lossy().into_owned()
         };
+        let is_binary = if envelope.payload.check_binary && metadata.is_some() && !is_dir {
+            match fs.open_sync(&expanded).await {
+                Ok(mut file) => {
+                    let mut header = [0; FILE_ANALYSIS_BYTES];
+                    match file.read(&mut header) {
+                        Ok(len) => analyze_byte_content(&header[..len]) == ByteContent::Binary,
+                        Err(error) => {
+                            log::debug!(
+                                "failed to inspect path metadata for {}: {error:#}",
+                                expanded.display()
+                            );
+                            true
+                        }
+                    }
+                }
+                Err(error) => {
+                    log::debug!(
+                        "failed to inspect path metadata for {}: {error:#}",
+                        expanded.display()
+                    );
+                    true
+                }
+            }
+        } else {
+            false
+        };
 
         Ok(proto::GetPathMetadataResponse {
             exists: metadata.is_some(),
             is_dir,
             path,
+            is_binary,
         })
     }
 

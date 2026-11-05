@@ -1,4 +1,5 @@
 mod debug_log;
+mod native_mcp;
 mod runtime;
 mod session_updates;
 mod terminal_updates;

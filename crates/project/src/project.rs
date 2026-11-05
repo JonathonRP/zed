@@ -79,6 +79,7 @@ use debugger::{
 
 pub use environment::ProjectEnvironment;
 
+use file_content::{ByteContent, FILE_ANALYSIS_BYTES, analyze_byte_content};
 use futures::{
     StreamExt,
     channel::mpsc::{self, UnboundedReceiver},
@@ -129,6 +130,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     future::Future,
+    io::Read as _,
     ops::{Not as _, Range},
     path::{Path, PathBuf},
     pin::pin,
@@ -5212,6 +5214,7 @@ impl Project {
                     project_id: REMOTE_SERVER_PROJECT_ID,
                     path: path.into(),
                     canonicalize: true,
+                    check_binary: false,
                 });
             cx.background_spawn(async move {
                 let response = request.await?;
@@ -5223,6 +5226,61 @@ impl Project {
                 } else {
                     Ok(None)
                 }
+            })
+        } else {
+            Task::ready(Ok(None))
+        }
+    }
+
+    pub fn resolve_abs_text_file_path(
+        &self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<ResolvedPath>>> {
+        if self.is_local() {
+            let expanded = PathBuf::from(shellexpand::tilde(path).into_owned());
+            let fs = self.fs.clone();
+            cx.background_spawn(async move {
+                if fs
+                    .metadata(&expanded)
+                    .await?
+                    .is_none_or(|metadata| metadata.is_dir)
+                {
+                    return Ok(None);
+                }
+
+                let mut file = fs.open_sync(&expanded).await?;
+                let mut header = [0; FILE_ANALYSIS_BYTES];
+                let len = file.read(&mut header)?;
+                if analyze_byte_content(&header[..len]) == ByteContent::Binary {
+                    return Ok(None);
+                }
+
+                Ok(Some(ResolvedPath::AbsPath {
+                    path: expanded.to_string_lossy().into_owned(),
+                    is_dir: false,
+                }))
+            })
+        } else if let Some(ssh_client) = self.remote_client.as_ref() {
+            let request = ssh_client
+                .read(cx)
+                .proto_client()
+                .request(proto::GetPathMetadata {
+                    project_id: REMOTE_SERVER_PROJECT_ID,
+                    path: path.into(),
+                    canonicalize: false,
+                    check_binary: true,
+                });
+            cx.background_spawn(async move {
+                let response = request.await?;
+                if !response.exists || response.is_dir || response.is_binary {
+                    return Ok(None);
+                }
+
+                Ok(Some(ResolvedPath::AbsPath {
+                    path: response.path,
+                    is_dir: false,
+                }))
             })
         } else {
             Task::ready(Ok(None))
@@ -5249,6 +5307,7 @@ impl Project {
                     project_id: REMOTE_SERVER_PROJECT_ID,
                     path: path.into(),
                     canonicalize: false,
+                    check_binary: false,
                 });
             cx.background_spawn(async move {
                 let response = request.await.log_err()?;

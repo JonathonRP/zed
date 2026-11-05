@@ -1,0 +1,136 @@
+name: RP upstream main sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rp-upstream-main-sync
+  cancel-in-progress: false
+
+jobs:
+  fast_forward:
+    name: Fast-forward fork main
+    if: github.repository == 'JonathonRP/zed'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Fetch exact fork and upstream tips
+        id: tips
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "JonathonRP/zed"
+          git init --bare "$RUNNER_TEMP/sync.git"
+          cd "$RUNNER_TEMP/sync.git"
+          fork_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          upstream_url="https://github.com/zed-industries/zed.git"
+          git remote add fork "$fork_url"
+          git remote add upstream "$upstream_url"
+          git fetch --no-tags fork refs/heads/main:refs/remotes/fork/main
+          git fetch --no-tags upstream refs/heads/main:refs/remotes/upstream/main
+          old_sha="$(git rev-parse refs/remotes/fork/main)"
+          new_sha="$(git rev-parse refs/remotes/upstream/main)"
+          {
+            echo "old_sha=$old_sha"
+            echo "new_sha=$new_sha"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$old_sha" = "$new_sha" ]]; then
+            echo "update=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor "$old_sha" "$new_sha"; then
+            echo "Fork main $old_sha is not an ancestor of upstream main $new_sha." \
+              > "$RUNNER_TEMP/block-reason.txt"
+            exit 1
+          fi
+          live_sha="$(
+            git ls-remote --exit-code fork refs/heads/main | cut -f1
+          )"
+          if [[ "$live_sha" != "$old_sha" ]]; then
+            echo "Fork main moved from $old_sha to $live_sha during synchronization." \
+              > "$RUNNER_TEMP/block-reason.txt"
+            exit 1
+          fi
+          echo "update=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push fast-forward without force
+        if: steps.tips.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLD_SHA: ${{ steps.tips.outputs.old_sha }}
+          NEW_SHA: ${{ steps.tips.outputs.new_sha }}
+          RP_MAIN_SYNC_DEPLOY_KEY: ${{ secrets.RP_MAIN_SYNC_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/sync.git"
+          live_sha="$(
+            git ls-remote --exit-code fork refs/heads/main | cut -f1
+          )"
+          if [[ "$live_sha" != "$OLD_SHA" ]]; then
+            echo "Fork main moved from $OLD_SHA to $live_sha before push." \
+              > "$RUNNER_TEMP/block-reason.txt"
+            exit 1
+          fi
+          test -n "$RP_MAIN_SYNC_DEPLOY_KEY"
+          key_file="$RUNNER_TEMP/rp-main-sync-key"
+          known_hosts="$RUNNER_TEMP/github-known-hosts"
+          trap 'rm -f "$key_file" "$known_hosts"' EXIT
+          printf '%s\n' "$RP_MAIN_SYNC_DEPLOY_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$known_hosts"
+          git remote set-url fork "git@github.com:${GITHUB_REPOSITORY}.git"
+          GIT_SSH_COMMAND="ssh -i $key_file -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
+            git push fork "${NEW_SHA}:refs/heads/main"
+          git remote set-url fork "https://github.com/${GITHUB_REPOSITORY}.git"
+          updated_sha="$(
+            git ls-remote --exit-code fork refs/heads/main | cut -f1
+          )"
+          if [[ "$updated_sha" != "$NEW_SHA" ]]; then
+            echo "Fork main resolved to $updated_sha instead of $NEW_SHA." \
+              > "$RUNNER_TEMP/block-reason.txt"
+            exit 1
+          fi
+
+      - name: Write synchronization audit
+        if: success()
+        env:
+          OLD_SHA: ${{ steps.tips.outputs.old_sha }}
+          NEW_SHA: ${{ steps.tips.outputs.new_sha }}
+          UPDATED: ${{ steps.tips.outputs.update }}
+        run: |
+          {
+            echo "## Fork main synchronization"
+            echo
+            echo "- Schedule: \`0 0 * * *\` (00:00 UTC daily)"
+            echo "- Previous fork main: \`${OLD_SHA}\`"
+            echo "- Upstream main: \`${NEW_SHA}\`"
+            echo "- Updated: \`${UPDATED}\`"
+            echo
+            echo "Only a server-enforced fast-forward push was attempted; no upstream code ran."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report blocked synchronization
+        if: failure()
+        env:
+          OLD_SHA: ${{ steps.tips.outputs.old_sha }}
+          NEW_SHA: ${{ steps.tips.outputs.new_sha }}
+        run: |
+          set -euo pipefail
+          reason="$RUNNER_TEMP/block-reason.txt"
+          if [[ ! -s "$reason" ]]; then
+            printf 'The guarded fast-forward operation failed unexpectedly.\n' > "$reason"
+          fi
+          {
+            echo "## Fork main synchronization blocked"
+            echo
+            cat "$reason"
+            echo
+            echo "- Fork main: \`${OLD_SHA:-unknown}\`"
+            echo "- Upstream main: \`${NEW_SHA:-unknown}\`"
+            echo
+            echo "No force push or automatic divergence resolution was attempted."
+          } >> "$GITHUB_STEP_SUMMARY"
