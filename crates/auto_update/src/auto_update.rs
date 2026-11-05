@@ -1500,6 +1500,7 @@ impl AutoUpdater {
             cx.notify();
         });
 
+        #[cfg(any(not(test), target_os = "windows"))]
         let rp_installer_asset = match download.as_ref() {
             Some(UpdateDownload::Rp(asset)) => Some(asset.clone()),
             _ => None,
