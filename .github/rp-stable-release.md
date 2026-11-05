@@ -18,8 +18,12 @@ The metadata RPC retains upstream's `canonicalize` field at tag 3 and RP's
 `check_binary` at tag 4. Release workflows, provenance and authorization
 verifiers, embedded-binary metadata diagnostics, multiline Windows build
 metadata, and the exclusive installed-calendar floor remain unchanged.
-This source port must follow the v1.25.3 merge; it does not authorize
-publication, installation, or copied-profile acceptance.
+The preceding v1.25.3 product merged normally at
+`0f9a1e0d02d26b414f6584dbc7738f6749a66c83`, with the same tree as its tested
+head `c147e5957e146c3b32b340bf33497ef90c15b478`. That actual release merge,
+not the earlier candidate, is this port's integration first parent.
+This source port does not authorize publication, installation, or
+copied-profile acceptance.
 
 ## Manual v1.25.3 product port
 
