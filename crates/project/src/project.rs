@@ -76,6 +76,7 @@ use debugger::{
 
 pub use environment::ProjectEnvironment;
 
+use file_content::{ByteContent, FILE_ANALYSIS_BYTES, analyze_byte_content};
 use futures::{
     StreamExt,
     channel::mpsc::{self, UnboundedReceiver},
@@ -90,10 +91,10 @@ use gpui::{
     Task, TaskExt, WeakEntity, Window,
 };
 use language::{
-    Buffer, BufferEditSource, BufferEvent, ByteContent, Capability, CodeLabel, CursorShape,
-    DiskState, FILE_ANALYSIS_BYTES, Language, LanguageName, LanguageRegistry, PointUtf16, ToOffset,
-    ToPointUtf16, Toolchain, ToolchainMetadata, ToolchainScope, Transaction, Unclipped,
-    analyze_byte_content, language_settings::InlayHintKind, proto::split_operations,
+    Buffer, BufferEditSource, BufferEvent, Capability, CodeLabel, CursorShape, DiskState, Language,
+    LanguageName, LanguageRegistry, PointUtf16, ToOffset, ToPointUtf16, Toolchain,
+    ToolchainMetadata, ToolchainScope, Transaction, Unclipped, language_settings::InlayHintKind,
+    proto::split_operations,
 };
 use lsp::{
     CodeActionKind, CompletionContext, CompletionItemKind, DocumentHighlightKind, InsertTextMode,
@@ -142,7 +143,7 @@ use toolchain_store::EmptyToolchainStore;
 use util::{
     ResultExt as _, maybe,
     path_list::PathList,
-    paths::{PathStyle, SanitizedPath, is_absolute},
+    paths::{PathStyle, SanitizedPath},
     rel_path::RelPath,
 };
 use worktree::{CreatedEntry, Snapshot, Traversal};
@@ -351,6 +352,7 @@ pub enum Event {
         name: Option<LanguageServerName>,
     },
     ToggleLspLogs {
+        peer_id: proto::PeerId,
         server_id: LanguageServerId,
         enabled: bool,
         toggled_log_kind: LogKind,
@@ -505,10 +507,10 @@ pub enum PrepareRenameResponse {
 pub enum InlayId {
     EditPrediction(usize),
     DebuggerValue(usize),
+    ReplResult(usize),
     // LSP
     Hint(usize),
     Color(usize),
-    ReplResult(usize),
 }
 
 impl InlayId {
@@ -531,7 +533,14 @@ pub struct InlayHint {
     pub padding_left: bool,
     pub padding_right: bool,
     pub tooltip: Option<InlayHintTooltip>,
+    pub text_edits: Option<InlayHintTextEdits>,
     pub resolve_state: ResolveState,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InlayHintTextEdits {
+    pub edits: Vec<(Range<Anchor>, String)>,
+    pub buffer_version: clock::Global,
 }
 
 /// The user's intent behind a given completion confirmation.
@@ -854,6 +863,12 @@ impl InlayHint {
             InlayHintLabel::String(s) => Rope::from(s),
             InlayHintLabel::LabelParts(parts) => parts.iter().map(|part| &*part.value).collect(),
         }
+    }
+
+    pub fn has_text_edits(&self) -> bool {
+        self.text_edits
+            .as_ref()
+            .is_some_and(|text_edits| !text_edits.edits.is_empty())
     }
 }
 
@@ -2570,7 +2585,10 @@ impl Project {
             .filter_map(|worktree| {
                 let worktree = worktree.read(cx);
                 let abs_path = worktree.abs_path();
-                let relative_path = path_style.strip_prefix(path, abs_path.as_ref())?;
+                let relative_path = path_style
+                    .strip_prefix(path, abs_path.as_ref())
+                    .ok()
+                    .and_then(|path| RelPath::new(path, path_style).ok())?;
                 // Don't exclude the worktree root itself, only actual subdirectories
                 let is_subpath = !relative_path.is_empty();
                 // Gitignored subtrees aren't scanned, so their contents don't
@@ -2604,7 +2622,10 @@ impl Project {
             .filter_map(|worktree| {
                 let worktree = worktree.read(cx);
                 let abs_path = worktree.abs_path();
-                let relative_path = path_style.strip_prefix(path, abs_path.as_ref())?;
+                let relative_path = path_style
+                    .strip_prefix(path, abs_path.as_ref())
+                    .ok()
+                    .and_then(|path| RelPath::new(path, path_style).ok())?;
                 let is_subpath =
                     !relative_path.is_empty() && !worktree.is_path_ignored(&relative_path);
                 is_subpath.then(|| worktree.is_visible())
@@ -4959,7 +4980,7 @@ impl Project {
         buffer: &Entity<Buffer>,
         cx: &mut Context<Self>,
     ) -> Task<Option<ResolvedPath>> {
-        if util::paths::is_absolute(path, self.path_style(cx)) || path.starts_with("~") {
+        if self.path_style(cx).has_root(Path::new(path)) || path.starts_with("~") {
             self.resolve_abs_path(path, cx)
         } else {
             self.resolve_path_in_worktrees(path, buffer, cx)
@@ -4978,31 +4999,96 @@ impl Project {
         })
     }
 
-    pub fn resolve_abs_text_file_path(
+    pub fn resolve_abs_file_link(
         &self,
         path: &str,
         cx: &mut Context<Self>,
-    ) -> Task<Option<ResolvedPath>> {
+    ) -> Task<Result<Option<ResolvedPath>>> {
+        let resolve_task = self.resolve_abs_file_path_canonical(path, cx);
+        let path = if self.is_local() {
+            shellexpand::tilde(path).into_owned()
+        } else {
+            path.to_owned()
+        };
+        cx.spawn(async move |project, cx| {
+            let Some(resolved_path) = resolve_task.await? else {
+                return Ok(None);
+            };
+            let path = if path.starts_with("~") {
+                let Ok(task) =
+                    project.update(cx, |project, cx| project.resolve_abs_path(&path, cx))
+                else {
+                    return Ok(None);
+                };
+                let Some(path) = task.await.and_then(ResolvedPath::into_abs_path) else {
+                    return Ok(Some(resolved_path));
+                };
+                path
+            } else {
+                path
+            };
+            let Ok(candidate) = project.update(cx, |project, cx| {
+                let lexical_path = project.path_style(cx).normalize(&path);
+                let project_path =
+                    project.project_path_for_absolute_path(Path::new(&lexical_path), cx)?;
+                let abs_path = project.absolute_path(&project_path, cx)?;
+                let task = project.resolve_abs_file_path_canonical(abs_path.to_str()?, cx);
+                Some((project_path, abs_path, task))
+            }) else {
+                return Ok(None);
+            };
+            let Some((project_path, abs_path, task)) = candidate else {
+                return Ok(Some(resolved_path));
+            };
+            let canonical_candidate = task
+                .await
+                .with_context(|| format!("validating file link alias {abs_path:?}"))
+                .log_err()
+                .flatten();
+            let Ok(alias_unchanged) = project.read_with(cx, |project, cx| {
+                project.absolute_path(&project_path, cx).as_deref() == Some(abs_path.as_path())
+            }) else {
+                return Ok(None);
+            };
+            if alias_unchanged
+                && canonical_candidate
+                    .is_some_and(|candidate| candidate.abs_path() == resolved_path.abs_path())
+            {
+                Ok(Some(ResolvedPath::ProjectPath {
+                    project_path,
+                    is_dir: false,
+                }))
+            } else {
+                Ok(Some(resolved_path))
+            }
+        })
+    }
+
+    pub fn resolve_abs_file_path_canonical(
+        &self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<ResolvedPath>>> {
         if self.is_local() {
             let expanded = PathBuf::from(shellexpand::tilde(path).into_owned());
             let fs = self.fs.clone();
             cx.background_spawn(async move {
-                let metadata = fs.metadata(&expanded).await.ok().flatten()?;
-                if metadata.is_dir {
-                    return None;
+                if fs
+                    .metadata(&expanded)
+                    .await?
+                    .is_none_or(|metadata| metadata.is_dir)
+                {
+                    return Ok(None);
                 }
-
-                let mut file = fs.open_sync(&expanded).await.ok()?;
-                let mut header = [0; FILE_ANALYSIS_BYTES];
-                let len = file.read(&mut header).ok()?;
-                if analyze_byte_content(&header[..len]) == ByteContent::Binary {
-                    return None;
-                }
-
-                Some(ResolvedPath::AbsPath {
-                    path: expanded.to_string_lossy().into_owned(),
+                let path = fs.canonicalize(&expanded).await?;
+                let path = path
+                    .to_str()
+                    .context("canonical file path is not valid UTF-8")?
+                    .to_owned();
+                Ok(Some(ResolvedPath::AbsPath {
+                    path,
                     is_dir: false,
-                })
+                }))
             })
         } else if let Some(ssh_client) = self.remote_client.as_ref() {
             let request = ssh_client
@@ -5011,27 +5097,77 @@ impl Project {
                 .request(proto::GetPathMetadata {
                     project_id: REMOTE_SERVER_PROJECT_ID,
                     path: path.into(),
+                    canonicalize: true,
+                    check_binary: false,
+                });
+            cx.background_spawn(async move {
+                let response = request.await?;
+                if response.exists && !response.is_dir {
+                    Ok(Some(ResolvedPath::AbsPath {
+                        path: response.path,
+                        is_dir: false,
+                    }))
+                } else {
+                    Ok(None)
+                }
+            })
+        } else {
+            Task::ready(Ok(None))
+        }
+    }
+
+    pub fn resolve_abs_text_file_path(
+        &self,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Option<ResolvedPath>>> {
+        if self.is_local() {
+            let expanded = PathBuf::from(shellexpand::tilde(path).into_owned());
+            let fs = self.fs.clone();
+            cx.background_spawn(async move {
+                if fs
+                    .metadata(&expanded)
+                    .await?
+                    .is_none_or(|metadata| metadata.is_dir)
+                {
+                    return Ok(None);
+                }
+
+                let mut file = fs.open_sync(&expanded).await?;
+                let mut header = [0; FILE_ANALYSIS_BYTES];
+                let len = file.read(&mut header)?;
+                if analyze_byte_content(&header[..len]) == ByteContent::Binary {
+                    return Ok(None);
+                }
+
+                Ok(Some(ResolvedPath::AbsPath {
+                    path: expanded.to_string_lossy().into_owned(),
+                    is_dir: false,
+                }))
+            })
+        } else if let Some(ssh_client) = self.remote_client.as_ref() {
+            let request = ssh_client
+                .read(cx)
+                .proto_client()
+                .request(proto::GetPathMetadata {
+                    project_id: REMOTE_SERVER_PROJECT_ID,
+                    path: path.into(),
+                    canonicalize: false,
                     check_binary: true,
                 });
             cx.background_spawn(async move {
-                let response = match request.await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        log::debug!("failed to preflight ACP tool call location: {error:#}");
-                        return None;
-                    }
-                };
+                let response = request.await?;
                 if !response.exists || response.is_dir || response.is_binary {
-                    return None;
+                    return Ok(None);
                 }
 
-                Some(ResolvedPath::AbsPath {
+                Ok(Some(ResolvedPath::AbsPath {
                     path: response.path,
                     is_dir: false,
-                })
+                }))
             })
         } else {
-            Task::ready(None)
+            Task::ready(Ok(None))
         }
     }
 
@@ -5054,6 +5190,7 @@ impl Project {
                 .request(proto::GetPathMetadata {
                     project_id: REMOTE_SERVER_PROJECT_ID,
                     path: path.into(),
+                    canonicalize: false,
                     check_binary: false,
                 });
             cx.background_spawn(async move {
@@ -5349,7 +5486,7 @@ impl Project {
         let path = path.as_ref();
         let worktree_store = self.worktree_store.read(cx);
 
-        if is_absolute(&path.to_string_lossy(), path_style) {
+        if path_style.has_root(path) {
             for worktree in worktree_store.visible_worktrees(cx) {
                 let worktree_abs_path = worktree.read(cx).abs_path();
 
@@ -5942,6 +6079,7 @@ impl Project {
         envelope: TypedEnvelope<proto::ToggleLspLogs>,
         mut cx: AsyncApp,
     ) -> Result<()> {
+        let peer_id = envelope.original_sender_id()?;
         let toggled_log_kind =
             match proto::toggle_lsp_logs::LogType::try_from(envelope.payload.log_type)
                 .ok()
@@ -5953,6 +6091,7 @@ impl Project {
             };
         project.update(&mut cx, |_, cx| {
             cx.emit(Event::ToggleLspLogs {
+                peer_id,
                 server_id: LanguageServerId::from_proto(envelope.payload.server_id),
                 enabled: envelope.payload.enabled,
                 toggled_log_kind,

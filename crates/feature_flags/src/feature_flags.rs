@@ -131,6 +131,11 @@ pub trait FeatureFlag {
         false
     }
 
+    /// Whether non-staff users can opt in or out through settings in release builds.
+    fn allows_user_override() -> bool {
+        false
+    }
+
     /// Subscribes the current view to changes in the feature flag store, so
     /// that any mutation of flags or overrides will trigger a re-render.
     ///

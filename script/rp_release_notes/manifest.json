@@ -5,6 +5,10 @@
       "file": "script/rp_release_notes/fragments/acp-replay-reliability.md"
     },
     {
+      "id": "acp-v2-native-mcp",
+      "file": "script/rp_release_notes/fragments/acp-v2-native-mcp.md"
+    },
+    {
       "id": "document-color-swatch-shapes",
       "file": "script/rp_release_notes/fragments/document-color-swatch-shapes.md"
     },
