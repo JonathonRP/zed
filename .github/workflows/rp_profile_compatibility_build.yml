@@ -247,11 +247,15 @@ jobs:
       - name: Pin compiler cache wrapper
         shell: pwsh
         run: |
-          if (-not (Test-Path -LiteralPath $env:SCCACHE_PATH -PathType Leaf)) {
-            throw "sccache path missing"
+          $sccachePath = "$env:SCCACHE_PATH.exe"
+          if (-not (Test-Path -LiteralPath $sccachePath -PathType Leaf)) {
+            throw "sccache action did not provide a valid SCCACHE_PATH"
           }
-          "RUSTC_WRAPPER=$env:SCCACHE_PATH" | Out-File -Append -FilePath $env:GITHUB_ENV
-          "CARGO_BUILD_RUSTC_WRAPPER=$env:SCCACHE_PATH" | Out-File -Append -FilePath $env:GITHUB_ENV
+          @(
+            "SCCACHE_PATH=$sccachePath"
+            "RUSTC_WRAPPER=$sccachePath"
+            "CARGO_BUILD_RUSTC_WRAPPER=$sccachePath"
+          ) | Out-File -Append -FilePath $env:GITHUB_ENV -Encoding utf8
 
       - name: Type-check port-sensitive Windows source and tests
         if: ${{ !cancelled() && steps.windows_source_verified.outcome == 'success' }}
