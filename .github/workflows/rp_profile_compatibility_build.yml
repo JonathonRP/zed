@@ -17,7 +17,7 @@ concurrency:
 
 env:
   SOURCE_SHA: ${{ inputs.source_sha }}
-  CARGO_BUILD_JOBS: "2"
+  CARGO_BUILD_JOBS: "1"
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -31,7 +31,7 @@ jobs:
     if: github.repository == 'JonathonRP/zed' && github.repository_owner == 'JonathonRP'
     name: Supplementary focused Linux tests (not release authorization)
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       CC: clang
       CXX: clang++
@@ -190,7 +190,7 @@ jobs:
     if: github.repository == 'JonathonRP/zed' && github.repository_owner == 'JonathonRP'
     name: Supplementary Windows port type check (not an installer)
     runs-on: windows-2022
-    timeout-minutes: 100
+    timeout-minutes: 150
     steps:
       - name: Validate repository and immutable source input
         shell: pwsh
