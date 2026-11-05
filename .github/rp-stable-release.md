@@ -4,6 +4,27 @@
 second GitHub account. RP stable releases instead separate merge, compatibility
 evidence, and publication into auditable owner actions.
 
+## Manual v1.26.2 product port
+
+The next product foundation is exactly official `v1.26.2` at
+`c4273271092b0287f7d181f616bd5171e0a2f70c`. It retains the v1.25.3 RP
+behavior described below, including opt-in ACP v2, fresh-process v1 fallback,
+the session-scoped read-only native MCP service, and replay location guards.
+The earlier ACP backports are reconciled against their original upstream
+snapshot so the v1.26.2 subagent ownership, submission state, and UI changes
+remain intact rather than being replaced by the older backported copies.
+
+The metadata RPC retains upstream's `canonicalize` field at tag 3 and RP's
+`check_binary` at tag 4. Release workflows, provenance and authorization
+verifiers, embedded-binary metadata diagnostics, multiline Windows build
+metadata, and the exclusive installed-calendar floor remain unchanged.
+The preceding v1.25.3 product merged normally at
+`0f9a1e0d02d26b414f6584dbc7738f6749a66c83`, with the same tree as its tested
+head `c147e5957e146c3b32b340bf33497ef90c15b478`. That actual release merge,
+not the earlier candidate, is this port's integration first parent.
+This source port does not authorize publication, installation, or
+copied-profile acceptance.
+
 ## Manual v1.25.3 product port
 
 The product foundation is exactly official `v1.25.3` at
