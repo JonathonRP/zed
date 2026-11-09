@@ -1,7 +1,10 @@
 import json
+import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 from rp_stable_sync import (
@@ -459,6 +462,264 @@ class StableSyncTests(unittest.TestCase):
         self.assertNotIn("--force", handoff)
         self.assertIn("expected-repository", handoff)
         self.assertIn("human_progress", handoff)
+
+
+class StableSyncAuthenticationTests(unittest.TestCase):
+    steps = ("Push deterministic sync branch", "Surface manual stable port")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bash = shutil.which("bash")
+        if cls.bash is None:
+            raise RuntimeError(
+                "Bash is required for stable-sync authentication tests"
+            )
+        cls.repo = pathlib.Path(__file__).resolve().parents[1]
+        cls.workflow = (
+            cls.repo / ".github/workflows/rp_stable_sync.yml"
+        ).read_text(encoding="utf-8")
+
+    def run_step(self, name: str, **overrides: str):
+        step = self.workflow.split(f"      - name: {name}\n", 1)[1].split(
+            "\n      - name:", 1
+        )[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        environment = os.environ.copy()
+        environment.update(
+            GITHUB_REPOSITORY="JonathonRP/zed",
+            GITHUB_REPOSITORY_OWNER="JonathonRP",
+            GITHUB_SERVER_URL="https://github.com",
+            GITHUB_RUN_ID="1",
+            GH_TOKEN="test-api-token",
+            RP_STABLE_SYNC_DEPLOY_KEY="test-only-not-a-private-key",
+            NEW_VERSION="1.27.0",
+            NEW_TAG="v1.27.0",
+            RELEASE_TIP="a" * 40,
+            FAILED_COMMIT="d" * 40,
+            CONFLICTED_PATH_COUNT="1",
+            LIVE_RELEASE_TIP="a" * 40,
+            REMOTE_TIP="",
+            HANDOFF_STATE="missing",
+            META_STATE="keys",
+            PUSH_STATUS="0",
+        )
+        environment.update(overrides)
+        with tempfile.TemporaryDirectory(prefix="rp stable ssh ") as directory:
+            root = pathlib.Path(directory)
+            environment["RP_TEST_ROOT"] = root.as_posix()
+            (root / ".github").mkdir()
+            control = root / "control/script"
+            control.mkdir(parents=True)
+            (root / "rebase-conflict.json").write_text("{}\n", encoding="utf-8")
+            shutil.copyfile(
+                self.repo / "script/rp_stable_sync_ssh.sh",
+                control / "rp_stable_sync_ssh.sh",
+            )
+            preamble = r"""
+                set -euo pipefail
+                cd "$RP_TEST_ROOT"
+                export GITHUB_WORKSPACE="$PWD" RUNNER_TEMP="$PWD"
+                export GITHUB_OUTPUT="$PWD/github-output"
+                export GITHUB_STEP_SUMMARY="$PWD/summary"
+                log() { printf '%s\n' "$*" >> "$RUNNER_TEMP/calls"; }
+                chmod() { log "chmod $*"; command chmod "$@"; }
+                ssh() {
+                  test "$1" = "-i"
+                  test "$(cat "$2")" = "test-only-not-a-private-key"
+                  test "$3" = "-o"
+                  test "$4" = "IdentitiesOnly=yes"
+                  test "$5" = "-o"
+                  test "$6" = "UserKnownHostsFile=${2%/key}/known_hosts"
+                  test "$(cat "${6#*=}")" = "github.com test-host-key"
+                  test "$7" = "-o"
+                  test "$8" = "StrictHostKeyChecking=yes"
+                  test "$#" = 8
+                  log "ssh verified"
+                }
+                git() {
+                  log "git $*"
+                  case "$1" in
+                    rev-parse) printf '%s\n' "$RELEASE_TIP" ;;
+                    ls-remote)
+                      test "$2" = "git@github.com:JonathonRP/zed.git"
+                      eval "$GIT_SSH_COMMAND"
+                      if [[ "$3" = "refs/heads/release/rp-stable" ]]; then
+                        printf '%s\t%s\n' "$LIVE_RELEASE_TIP" "$3"
+                      elif [[ -n "$REMOTE_TIP" ]]; then
+                        printf '%s\t%s\n' "$REMOTE_TIP" "$3"
+                      fi
+                      ;;
+                    push)
+                      test "$2" = "git@github.com:JonathonRP/zed.git"
+                      eval "$GIT_SSH_COMMAND"
+                      return "$PUSH_STATUS"
+                      ;;
+                    fetch)
+                      test "$2" = "--no-tags"
+                      test "$3" = "git@github.com:JonathonRP/zed.git"
+                      eval "$GIT_SSH_COMMAND"
+                      ;;
+                  esac
+                }
+                gh() {
+                  test "$GH_TOKEN" = "test-api-token"
+                  test -z "${RP_STABLE_SYNC_DEPLOY_KEY:-}"
+                  log "gh $*"
+                  if [[ "$1 $2" = "api meta" ]]; then
+                    case "$META_STATE" in
+                      keys) printf 'github.com test-host-key\n' ;;
+                      empty) return 0 ;;
+                      failure) return 1 ;;
+                    esac
+                  elif [[ "$1" = "api" ]]; then
+                    printf '[]\n'
+                  elif [[ "$1 $2" = "pr create" ]]; then
+                    printf 'https://example.invalid/pr/1\n'
+                  fi
+                }
+                jq() { cat > /dev/null; printf '[]\n'; }
+                python3() {
+                  case "$2" in
+                    render) printf 'test body\n' > "$RUNNER_TEMP/manual-port-pr.md" ;;
+                    handoff)
+                      {
+                        printf 'state=%s\n' "$HANDOFF_STATE"
+                        if [[ "$HANDOFF_STATE" != "missing" ]]; then
+                          printf 'pr_number=1\npr_state=open\n'
+                          printf 'pr_url=https://example.invalid/pr/1\n'
+                        fi
+                      } > "$RUNNER_TEMP/handoff-output"
+                      ;;
+                    *) return 1 ;;
+                  esac
+                }
+            """
+            (root / "step.sh").write_text(
+                textwrap.dedent(preamble) + "\n" + script,
+                encoding="utf-8",
+                newline="\n",
+            )
+            result = subprocess.run(
+                [
+                    self.bash,
+                    "--noprofile",
+                    "--norc",
+                    "-c",
+                    'source "$RP_TEST_ROOT/step.sh"',
+                ],
+                cwd=self.repo,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            calls = root / "calls"
+            trace = calls.read_text(encoding="utf-8") if calls.exists() else ""
+            self.assertEqual(list(root.glob("rp-stable-sync-ssh.*")), [])
+            self.assertNotIn("test-only-not-a-private-key", trace)
+            self.assertNotIn(
+                "test-only-not-a-private-key", result.stdout + result.stderr
+            )
+            return result, trace
+
+    def test_both_write_paths_use_dedicated_ssh_and_keep_push_semantics(self):
+        for name in self.steps:
+            with self.subTest(step=name):
+                result, trace = self.run_step(name)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("chmod 600 ", trace)
+                self.assertIn("gh api meta --jq", trace)
+                self.assertIn("ssh verified", trace)
+                self.assertIn("git push git@github.com:JonathonRP/zed.git ", trace)
+                self.assertNotIn("x-access-token", trace)
+                if name == self.steps[0]:
+                    self.assertIn(
+                        "--force-with-lease=refs/heads/automation/rp-stable-v1.27.0:\n",
+                        trace,
+                    )
+                else:
+                    self.assertNotIn("--force", trace)
+                    self.assertIn(
+                        "HEAD:refs/heads/automation/rp-stable-v1.27.0-manual-port",
+                        trace,
+                    )
+                    self.assertIn("--draft", trace)
+
+    def test_rebased_proposal_retains_exact_existing_tip_lease(self):
+        result, trace = self.run_step(self.steps[0], REMOTE_TIP="b" * 40)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "--force-with-lease=refs/heads/automation/rp-stable-v1.27.0:"
+            + "b" * 40,
+            trace,
+        )
+
+    def test_missing_stable_key_fails_before_network_or_git(self):
+        for name in self.steps:
+            with self.subTest(step=name):
+                result, trace = self.run_step(name, RP_STABLE_SYNC_DEPLOY_KEY="")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(
+                    "RP_STABLE_SYNC_DEPLOY_KEY is required", result.stderr
+                )
+                self.assertEqual(trace, "")
+
+    def test_host_key_failure_cleans_up_and_never_uses_git(self):
+        for name in self.steps:
+            for state in ("empty", "failure"):
+                with self.subTest(step=name, metadata=state):
+                    result, trace = self.run_step(name, META_STATE=state)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("git ", trace)
+                    if state == "empty":
+                        self.assertIn("refusing stable sync", result.stderr)
+
+    def test_moved_release_tip_blocks_both_write_paths(self):
+        for name in self.steps:
+            with self.subTest(step=name):
+                result, trace = self.run_step(name, LIVE_RELEASE_TIP="c" * 40)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("git push", trace)
+                self.assertNotIn("gh pr ", trace)
+
+    def test_failed_push_cleans_up_without_pr_creation_or_token_fallback(self):
+        for name in self.steps:
+            with self.subTest(step=name):
+                result, trace = self.run_step(name, PUSH_STATUS="1")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(trace.count("git push "), 1)
+                self.assertNotIn("gh pr ", trace)
+                self.assertNotIn("https://x-access-token", trace)
+
+    def test_existing_handoffs_are_read_over_ssh_and_never_pushed(self):
+        for state in ("generated_marker", "human_progress"):
+            with self.subTest(state=state):
+                result, trace = self.run_step(
+                    self.steps[1], HANDOFF_STATE=state, REMOTE_TIP="b" * 40
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("git fetch --no-tags", trace)
+                self.assertIn("ssh verified", trace)
+                self.assertNotIn("git push", trace)
+                self.assertNotIn("gh pr ", trace)
+
+    def test_credentials_remain_scoped_to_trusted_controller_write_steps(self):
+        propose, validate = self.workflow.split("\n  validate:", 1)
+        self.assertIn("github.ref == 'refs/heads/automation/rp-control'", propose)
+        self.assertIn('cron: "0 0 * * *"', propose)
+        self.assertIn("      contents: read", propose)
+        self.assertNotIn("contents: write", self.workflow)
+        self.assertEqual(propose.count("secrets.RP_STABLE_SYNC_DEPLOY_KEY"), 2)
+        self.assertEqual(
+            propose.count(
+                'source "$GITHUB_WORKSPACE/control/script/rp_stable_sync_ssh.sh"'
+            ),
+            2,
+        )
+        self.assertNotIn("RP_STABLE_SYNC_DEPLOY_KEY", validate)
+        self.assertNotIn("RP_MAIN_SYNC_DEPLOY_KEY", self.workflow)
+        self.assertNotIn("x-access-token", self.workflow)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       actions: write
-      contents: write
+      contents: read
       pull-requests: write
     defaults:
       run:
@@ -162,11 +162,13 @@ jobs:
         id: push
         env:
           GH_TOKEN: ${{ github.token }}
+          RP_STABLE_SYNC_DEPLOY_KEY: ${{ secrets.RP_STABLE_SYNC_DEPLOY_KEY }}
           NEW_VERSION: ${{ steps.stable.outputs.new_version }}
         run: |
           set -euo pipefail
+          source "$GITHUB_WORKSPACE/control/script/rp_stable_sync_ssh.sh"
           branch="automation/rp-stable-v${NEW_VERSION}"
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote="git@github.com:${GITHUB_REPOSITORY}.git"
           release_tip="$(git rev-parse HEAD^1)"
           live_release_tip="$(
             git ls-remote "$remote" refs/heads/release/rp-stable | cut -f1
@@ -232,6 +234,7 @@ jobs:
         if: steps.rebase.outputs.outcome == 'conflict'
         env:
           GH_TOKEN: ${{ github.token }}
+          RP_STABLE_SYNC_DEPLOY_KEY: ${{ secrets.RP_STABLE_SYNC_DEPLOY_KEY }}
           NEW_TAG: ${{ steps.stable.outputs.new_tag }}
           NEW_VERSION: ${{ steps.stable.outputs.new_version }}
           RELEASE_TIP: ${{ steps.rebase.outputs.release_tip }}
@@ -239,8 +242,9 @@ jobs:
           CONFLICTED_PATH_COUNT: ${{ steps.rebase.outputs.conflicted_path_count }}
         run: |
           set -euo pipefail
+          source "$GITHUB_WORKSPACE/control/script/rp_stable_sync_ssh.sh"
           branch="automation/rp-stable-v${NEW_VERSION}-manual-port"
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote="git@github.com:${GITHUB_REPOSITORY}.git"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           title="Manual RP stable port required for ${NEW_TAG}"
           body="$RUNNER_TEMP/manual-port-pr.md"
