@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
+
 # Zed
 
 [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
@@ -26,6 +29,45 @@ Other platforms are not yet available:
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
 
 Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+
+### RP fork stable-sync controller
+
+In `JonathonRP/zed`, `.github/workflows/rp_stable_sync.yml` runs proposals from
+`automation/rp-control`. Both the rebased proposal and manual-port handoff use
+SSH for Git operations, with a dedicated `RP_STABLE_SYNC_DEPLOY_KEY` secret.
+The key is written to a temporary file only in those trusted write steps,
+uses GitHub SSH host keys obtained from the HTTPS metadata API with strict
+host-key checking, and is removed when the step exits, including on failure.
+Missing credentials or unavailable host keys fail the step; there is no token
+fallback. `GITHUB_TOKEN` retains read-only contents access and the existing
+PR and validation-dispatch API permissions. Validation does not receive the key.
+
+This authentication change is a candidate, not an approved deployment. Before
+enabling it, the repository owner must approve the credential and control repair,
+provision a new repository write deploy key dedicated to stable sync, and store
+its private half as `RP_STABLE_SYNC_DEPLOY_KEY`. Do not reuse, replace, or expose
+`RP_MAIN_SYNC_DEPLOY_KEY`, export a CLI token, broaden token permissions, or bypass
+repository rules. Deploy keys grant repository-wide Git write access, not
+branch-scoped access; review that authority and keep the secret confined to the
+trusted controller's two write steps.
+
+Review the control-only diff and run
+`python -m unittest discover -s script -p 'test_rp_stable_sync.py'` before
+promotion. The reviewed controller must include both the workflow and
+`script/rp_stable_sync_ssh.sh`. Promote it through the existing reviewed-control
+process only after owner approval; separately review and authorize any
+workflow-blob transition required by the existing release/provenance gates.
+This candidate supplies no transition authorization or release change.
+After approved credential setup and promotion, verify both write paths and key
+cleanup in controlled runs before relying on scheduled operation. Local mocked
+tests do not establish that GitHub accepts the key or the workflow-containing
+pushes.
+
+The exact live release-tip checks, deterministic branches, existing proposal
+force-with-lease, non-forced manual handoff, human-progress preservation, and
+provenance/manual-review gates remain in place. Nothing auto-merges or publishes
+a release. The daily `0 0 * * *` schedule and main-sync job are unchanged;
+the cause of missed scheduled runs is unproven and recurrence is not verified.
 
 ### Licensing
 
