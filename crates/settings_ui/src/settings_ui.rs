@@ -525,6 +525,10 @@ pub fn init(cx: &mut App) {
 
 fn init_renderers(cx: &mut App) {
     cx.default_global::<SettingFieldRenderer>()
+        .add_renderer_erased(
+            TypeId::of::<pages::AcpBetaSettingField>(),
+            Box::new(pages::render_acp_beta_setting),
+        )
         .add_renderer::<UnimplementedSettingField>(
             |settings_window, item, _, settings_file, _, sub_field, _, cx| {
                 render_settings_item(
@@ -1844,6 +1848,7 @@ impl SettingsWindow {
                 last_is_staff = is_staff;
                 this.rebuild_pages(window, cx);
             }
+            cx.notify();
         })
         .detach();
 
@@ -5429,6 +5434,64 @@ fn render_icon_theme_picker(
 pub mod test {
 
     use super::*;
+
+    #[gpui::test]
+    fn acp_beta_experimental_setting_is_searchable_and_user_scoped(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            register_settings(cx);
+            cx.set_global(feature_flags::FeatureFlagStore::default());
+            init_renderers(cx);
+            let pages = page_data::settings_data(cx);
+            let experimental = pages
+                .into_iter()
+                .find(|page| page.title == "Experimental")
+                .expect("Experimental is visible without a staff gate");
+            assert_eq!(experimental.items[0].header_text(), Some("External Agents"));
+            let SettingsPageItem::SettingItem(item) = &experimental.items[1] else {
+                panic!("ACP v2 must be a setting field");
+            };
+            assert_eq!(item.title, "ACP v2");
+            assert_eq!(item.files, USER);
+            assert_eq!(item.field.json_path(), Some("feature_flags.acp-beta"));
+            assert!(
+                cx.default_global::<SettingFieldRenderer>()
+                    .renderers
+                    .borrow()
+                    .contains_key(&AnySettingField::type_id(item.field.as_ref()))
+            );
+
+            let mut settings_window = SettingsWindow::test(window, cx);
+            settings_window.pages = vec![experimental];
+            settings_window.build_search_index();
+            assert_eq!(
+                settings_window.filter_by_json_path("#feature_flags.acp-beta"),
+                vec![1],
+            );
+            let index = settings_window.search_index.as_ref().expect("search index");
+            let words = &index.documents[1].words;
+            for word in [
+                "experimental",
+                "external",
+                "agents",
+                "acp",
+                "v2",
+                "beta",
+                "mcp",
+            ] {
+                assert!(words.iter().any(|candidate| candidate == word), "{word}");
+            }
+            for file in [SettingsUiFile::User, SettingsUiFile::Server("test")] {
+                settings_window.current_file = file.clone();
+                settings_window.build_filter_table();
+                settings_window.filter_matches_to_file();
+                assert_eq!(
+                    settings_window.filter_table[0],
+                    vec![file == SettingsUiFile::User; 2],
+                );
+            }
+        });
+    }
 
     #[gpui::test]
     fn registers_lsp_document_color_inlay_position_renderer(cx: &mut gpui::TestAppContext) {
