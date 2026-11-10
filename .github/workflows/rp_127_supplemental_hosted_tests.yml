@@ -91,6 +91,8 @@ jobs:
               public struct Flags { public int Inherit, Reserved; public uint Value; }
               [StructLayout(LayoutKind.Sequential)]
               public struct Rect { public int Left, Top, Right, Bottom; }
+              [StructLayout(LayoutKind.Sequential)]
+              public struct Point { public int X, Y; }
               [DllImport("user32.dll")] public static extern IntPtr GetProcessWindowStation();
               [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
               public static extern bool GetUserObjectInformation(IntPtr handle, int index, ref Flags flags, uint size, out uint needed);
@@ -98,6 +100,7 @@ jobs:
               [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
               [DllImport("user32.dll", SetLastError = true)] public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
               [DllImport("user32.dll", SetLastError = true)] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+              [DllImport("user32.dll", SetLastError = true)] public static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
               [DllImport("user32.dll", SetLastError = true)]
               public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
               [DllImport("user32.dll", SetLastError = true)]
@@ -169,6 +172,25 @@ jobs:
               $image.Save((Join-Path $evidence $Name), [Drawing.Imaging.ImageFormat]::Png)
               if ($colors.Count -lt 16) { throw 'Owned capture lacks rendered color variation.' }
             } finally { $graphics.Dispose(); $image.Dispose() }
+          }
+          function Trust-SyntheticFixture {
+            $window = Owned-Window
+            $rect = [RpGui+Rect]::new()
+            $origin = [RpGui+Point]::new()
+            if (-not [RpGui]::GetWindowRect($window, [ref]$rect) -or
+                -not [RpGui]::ClientToScreen($window, [ref]$origin)) { throw 'Owned click coordinates unavailable.' }
+            # Position measured from the actual synthetic-only trust-dialog capture.
+            $x = [int](($rect.Right - $rect.Left) * 0.714) + $rect.Left - $origin.X
+            $y = [int](($rect.Bottom - $rect.Top) * 0.468) + $rect.Top - $origin.Y
+            if ($x -lt 0 -or $y -lt 0 -or $x -ge $rect.Right - $rect.Left -or $y -ge $rect.Bottom - $rect.Top) {
+              throw 'Synthetic trust click would be outside the owned window.'
+            }
+            $position = [IntPtr](($y -shl 16) -bor $x)
+            foreach ($event in @(@{ message = 0x200; buttons = 0 }, @{ message = 0x201; buttons = 1 }, @{ message = 0x202; buttons = 0 })) {
+              if (-not [RpGui]::PostMessage($window, $event.message, [UIntPtr]$event.buttons, $position)) {
+                throw 'Unable to click only the owned synthetic project trust dialog.'
+              }
+            }
           }
           function Close-Owned {
             if ($null -eq $script:process) { return }
@@ -247,7 +269,7 @@ jobs:
               }
               Start-Sleep -Milliseconds 500
               Capture "gui-$script:pass-rendered.png"
-              Key 0x0D 0x1C
+              Trust-SyntheticFixture
               Start-Sleep -Milliseconds 500
               Key 0x76 0x41
               Start-Sleep -Milliseconds 500
