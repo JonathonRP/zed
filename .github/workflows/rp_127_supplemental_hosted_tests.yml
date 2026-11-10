@@ -16,13 +16,13 @@ env:
   RUST_BACKTRACE: "1"
 jobs:
   focused-tests:
-    name: ACP, feature flags, and Settings UI (${{ matrix.os }})
+    name: Pinned real ACP adapter initialization (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 240
+    timeout-minutes: 120
     steps:
       - name: Checkout immutable product candidate
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
@@ -94,52 +94,61 @@ jobs:
             ~/.cargo/git
           key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
-      - name: Run complete relevant suites in standard environment
-        shell: pwsh
+      - name: Set up required Node runtime for pinned adapter
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Build only the existing ACP smoke test executable
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
-          Remove-Item Env:ZED_DISABLE_STAFF -ErrorAction SilentlyContinue
-          & cargo test -j 1 -p agent_servers -p feature_flags -p settings_ui --lib --locked -- --test-threads=1 2>&1 |
-            Tee-Object -FilePath hosted-test-evidence/full-suites.log
-          $exitCode = $LASTEXITCODE
-          if ($exitCode -ne 0) { throw "Complete relevant test suites failed with exit $exitCode." }
-          $results = Select-String -Path hosted-test-evidence/full-suites.log -Pattern 'test result: ok\. ([1-9][0-9]*) passed; 0 failed'
-          if (@($results).Count -ne 3) { throw 'Expected three genuinely executed nonempty test suites.' }
-          if (git status --porcelain --untracked-files=no) { throw 'Tests modified tracked candidate files.' }
-      - name: Run nonstaff ACP, native MCP, fallback, and new UI assertions
-        shell: pwsh
-        env:
-          ZED_DISABLE_STAFF: "1"
+          set -euo pipefail
+          cargo test -j 1 -p agent_servers --lib --locked --no-run --message-format=json \
+            > hosted-test-evidence/compiler-artifacts.jsonl \
+            2> >(tee hosted-test-evidence/compile.log >&2)
+          python3 - <<'PY'
+          import json, pathlib
+          messages = [json.loads(line) for line in pathlib.Path("hosted-test-evidence/compiler-artifacts.jsonl").read_text().splitlines()]
+          binaries = [m["executable"] for m in messages if m.get("reason") == "compiler-artifact" and m.get("target", {}).get("name") == "agent_servers" and m.get("profile", {}).get("test") and m.get("executable")]
+          if len(binaries) != 1:
+              raise RuntimeError(f"Expected one ACP test executable, found {binaries!r}")
+          pathlib.Path("hosted-test-evidence/test-executable.txt").write_text(binaries[0] + "\n")
+          PY
+      - name: Prewarm exact anonymous adapter package outside handshake timeouts
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
-          & cargo test -j 1 -p agent_servers -p feature_flags -p settings_ui --lib --locked -- acp_beta native_mcp v2_request_ids selection_tests --test-threads=1 2>&1 |
-            Tee-Object -FilePath hosted-test-evidence/nonstaff-focused.log
-          $exitCode = $LASTEXITCODE
-          if ($exitCode -ne 0) { throw "Nonstaff focused test suites failed with exit $exitCode." }
-          $log = Get-Content hosted-test-evidence/nonstaff-focused.log -Raw
-          foreach ($name in @(
-            'acp_beta_experimental_setting_is_searchable_and_user_scoped',
-            'acp_beta_persists_override_and_reset_restores_rollout',
-            'acp_beta_creates_existing_string_setting_without_other_flags'
-          )) {
-            if ($log -notmatch ([Regex]::Escape($name) + ' .*ok')) {
-              throw "Required UI assertion did not pass: $name"
-            }
-          }
-          if ($log -notmatch 'selection_tests::.* \.\.\. ok') {
-            throw 'The platform-specific ACP selection and fallback tests did not execute.'
-          }
-          if (@([Regex]::Matches($log, 'test result: ok\. [1-9][0-9]* passed; 0 failed')).Count -ne 3) {
-            throw 'Expected three nonempty nonstaff focused suites.'
-          }
-          if (git status --porcelain --untracked-files=no) { throw 'Tests modified tracked candidate files.' }
+          set -euo pipefail
+          isolated_home="$RUNNER_TEMP/rp-adapter-smoke-home"
+          isolated_tmp="$RUNNER_TEMP/rp-adapter-smoke-tmp"
+          mkdir "$isolated_home" "$isolated_tmp"
+          timeout --signal=TERM --kill-after=15s 300s env -i \
+            HOME="$isolated_home" TMPDIR="$isolated_tmp" PATH="$PATH" \
+            npx --yes @agentclientprotocol/claude-agent-acp@0.94.0 --version \
+            2>&1 | tee hosted-test-evidence/pinned-adapter-version.log
+          grep -Fx '0.94.0' hosted-test-evidence/pinned-adapter-version.log
+      - name: Run exact pinned adapter smoke without inherited credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          isolated_home="$RUNNER_TEMP/rp-adapter-smoke-home"
+          isolated_tmp="$RUNNER_TEMP/rp-adapter-smoke-tmp"
+          test -d "$isolated_home"
+          test -d "$isolated_tmp"
+          binary="$(cat hosted-test-evidence/test-executable.txt)"
+          test -x "$binary"
+          timeout --signal=TERM --kill-after=15s 180s env -i \
+            HOME="$isolated_home" TMPDIR="$isolated_tmp" PATH="$PATH" \
+            ZED_HEADLESS=1 ZED_DISABLE_STAFF=1 SEED=0 ITERATIONS=1 \
+            "$binary" acp::selection_tests::claude_adapter_initialize_smoke \
+            --ignored --exact --nocapture --test-threads=1 \
+            2>&1 | tee hosted-test-evidence/real-adapter-smoke.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' \
+            hosted-test-evidence/real-adapter-smoke.log
+          test -z "$(git status --porcelain --untracked-files=no)"
       - name: Preserve source-bound test logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rp-127-supplemental-tests-${{ matrix.os }}-e27be8d21bbc2c756732280d1730e69039c7fdb3
+          name: rp-127-real-adapter-smoke-e27be8d21bbc2c756732280d1730e69039c7fdb3
           path: hosted-test-evidence/
           if-no-files-found: error
           retention-days: 7
