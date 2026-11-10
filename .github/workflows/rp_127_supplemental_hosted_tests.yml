@@ -203,6 +203,7 @@ jobs:
               Set-Content "$profile\config\keymap.json" -Encoding utf8NoBOM
             $fixture = Join-Path $workspace 'hosted-fixture.txt'
             [IO.File]::WriteAllText($fixture, 'Hosted RP 1.27 fixture.')
+            $expectedText = "Hosted RP 1.27 fixture. Saved by hosted UI.`r`n"
             for ($script:pass = 1; $script:pass -le 2; $script:pass++) {
               $before = Read-Log
               $start = [Diagnostics.ProcessStartInfo]::new($exe)
@@ -262,14 +263,14 @@ jobs:
                 Key 0x78 0x43
                 $deadline = [DateTime]::UtcNow.AddSeconds(10)
                 do {
-                  if ([IO.File]::ReadAllText($fixture) -ceq "Hosted RP 1.27 fixture. Saved by hosted UI.`n") { break }
+                  if ([IO.File]::ReadAllText($fixture) -ceq $expectedText) { break }
                   Start-Sleep -Milliseconds 250
                 } while ([DateTime]::UtcNow -lt $deadline)
-                if ([IO.File]::ReadAllText($fixture) -cne "Hosted RP 1.27 fixture. Saved by hosted UI.`n") {
+                if ([IO.File]::ReadAllText($fixture) -cne $expectedText) {
                   throw 'Owned GUI did not save the exact synthetic edited fixture.'
                 }
                 Capture 'gui-1-edited-saved.png'
-              } elseif ([IO.File]::ReadAllText($fixture) -cne "Hosted RP 1.27 fixture. Saved by hosted UI.`n") {
+              } elseif ([IO.File]::ReadAllText($fixture) -cne $expectedText) {
                 throw 'Synthetic saved fixture did not persist across a fresh GUI process.'
               }
               $gui.passes += @{ pass = $script:pass; process_id = $script:process.Id; visible_owned_window = $true; rendered = $true }
