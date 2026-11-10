@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Download exact canonical Windows artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40a5b8a24b5f5461e7c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           repository: JonathonRP/zed
           run-id: 42872582412
@@ -23,7 +23,7 @@ jobs:
           name: rp-profile-compatibility-windows-x86_64-e27be8d21bbc2c756732280d1730e69039c7fdb3
           path: canonical-windows
       - name: Download exact canonical metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40a5b8a24b5f5461e7c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           repository: JonathonRP/zed
           run-id: 42872582412
@@ -92,7 +92,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Download exact canonical Linux artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40a5b8a24b5f5461e7c
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           repository: JonathonRP/zed
           run-id: 42872582412
