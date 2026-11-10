@@ -1,331 +1,244 @@
-name: RP 1.27 synthetic hosted Windows GUI
+name: RP 1.27 supplemental hosted tests
 on:
   push:
     branches:
       - validation/rp-127-e27-hosted-tests-20261110
 permissions:
   contents: read
-  actions: read
 env:
-  EXPECTED_SOURCE: e27be8d21bbc2c756732280d1730e69039c7fdb3
+  EXPECTED_SOURCE: 2d339cac9a9ffa47e1621aab8602b1870b95c5d1
+  EXPECTED_TREE: a8deac590f9678cf9d56230b9d844bd3b55006d8
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_TERM_COLOR: never
+  RUST_BACKTRACE: "1"
 jobs:
-  windows-prebuilt:
-    name: Delivered Windows synthetic GUI render and edit
-    runs-on: windows-2022
-    timeout-minutes: 10
+  focused-tests:
+    name: Atomic FS, catalog, ACP, flags, and Settings UI (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 240
     steps:
-      - name: Download exact canonical Windows artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - name: Checkout immutable product candidate
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
           repository: JonathonRP/zed
-          run-id: 42872582412
-          github-token: ${{ github.token }}
-          name: rp-profile-compatibility-windows-x86_64-e27be8d21bbc2c756732280d1730e69039c7fdb3
-          path: canonical-windows
-      - name: Download exact canonical metadata
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          repository: JonathonRP/zed
-          run-id: 42872582412
-          github-token: ${{ github.token }}
-          name: rp-profile-compatibility-metadata-e27be8d21bbc2c756732280d1730e69039c7fdb3
-          path: canonical-metadata
-      - name: Run bounded delivered-binary metadata diagnostic
+          ref: ${{ env.EXPECTED_SOURCE }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Record and guard actual tested source
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Path runtime-evidence | Out-Null
-          $manifest = Get-Content canonical-metadata/rp-release-manifest.json -Raw | ConvertFrom-Json
-          $packaged = Get-Content canonical-windows/windows-source-identity.json -Raw | ConvertFrom-Json
-          if ($manifest.commit -cne $env:EXPECTED_SOURCE -or $packaged.commit -cne $env:EXPECTED_SOURCE) {
-            throw 'Delivered artifact source mismatch.'
+          $source = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $source -cne $env:EXPECTED_SOURCE) {
+            throw 'Test checkout is not the immutable candidate.'
           }
-          $portable = Join-Path (Resolve-Path canonical-windows) $manifest.asset_names.windows_x86_64_portable
-          if ((Get-FileHash $portable -Algorithm SHA256).Hash.ToLowerInvariant() -cne
-              '3d03c4a07b120e411caed39eb524c82fca53e30c21cad79d6f8f6aeac26fa686') {
-            throw 'Portable archive digest mismatch.'
+          $tree = (git rev-parse 'HEAD^{tree}').Trim()
+          if ($LASTEXITCODE -ne 0 -or $tree -cne $env:EXPECTED_TREE) {
+            throw 'Test checkout tree mismatch.'
           }
-          $product = Join-Path $env:RUNNER_TEMP 'rp127-delivered-portable'
-          Expand-Archive -LiteralPath $portable -DestinationPath $product
-          $exe = Join-Path $product 'Zed.exe'
-          $digest = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($digest -cne '5537a7805a6cbcfa0c3941f73597c5dbe2098b2d0fd6187ea38260d802982065') {
-            throw 'Delivered RP executable digest mismatch.'
-          }
-          $metadata = (Resolve-Path canonical-metadata).Path
-          $process = Start-Process -FilePath $exe -ArgumentList @(
-            '--verify-rp-release-metadata', ('"' + $metadata + '"')
-          ) -PassThru -RedirectStandardOutput runtime-evidence/metadata.stdout.log `
-            -RedirectStandardError runtime-evidence/metadata.stderr.log
-          if (-not $process.WaitForExit(60000)) {
-            Stop-Process -Id $process.Id
-            throw 'Delivered metadata diagnostic exceeded its 60-second bound.'
-          }
-          if ($process.ExitCode -ne 0) { throw "Delivered metadata diagnostic exited $($process.ExitCode)." }
-          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion
-          if (-not $version.StartsWith('1.27.0+stable.') -or -not $version.EndsWith($env:EXPECTED_SOURCE)) {
-            throw "Delivered product version does not bind source: $version"
-          }
+          New-Item -ItemType Directory -Path hosted-test-evidence | Out-Null
           [ordered]@{
-            source = $env:EXPECTED_SOURCE
+            source = $source
+            tree = $tree
+            runner_os = $env:RUNNER_OS
+            runner_arch = $env:RUNNER_ARCH
             run_id = $env:GITHUB_RUN_ID
-            canonical_run = 42872582412
-            rp_executable_sha256 = $digest
-            product_version = $version
-            metadata_diagnostic_exit_code = $process.ExitCode
-            gui_runtime_tested = $false
-            private_profile_tested = $false
-            wsl_runtime_tested = $false
-            owner_acceptance = $false
-          } | ConvertTo-Json | Set-Content runtime-evidence/source.json -Encoding utf8NoBOM
-      - name: Try bounded synthetic GUI render, edit, save and reopen
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            workflow_definition_commit = $env:GITHUB_SHA
+            supplemental_tests_only = $true
+            release_authorization = $false
+          } | ConvertTo-Json |
+            Set-Content hosted-test-evidence/source.json -Encoding utf8NoBOM
+          rustc --version
+          if ($LASTEXITCODE -ne 0) { throw 'Required repository Rust toolchain is unavailable.' }
+          cargo --version
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo is unavailable.' }
+      - name: Check formatting of corrected source files
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Add-Type -AssemblyName System.Drawing
-          Add-Type -TypeDefinition @'
-          using System;
-          using System.Runtime.InteropServices;
-          public static class RpGui {
-              [StructLayout(LayoutKind.Sequential)]
-              public struct Flags { public int Inherit, Reserved; public uint Value; }
-              [StructLayout(LayoutKind.Sequential)]
-              public struct Rect { public int Left, Top, Right, Bottom; }
-              [StructLayout(LayoutKind.Sequential)]
-              public struct Point { public int X, Y; }
-              [DllImport("user32.dll")] public static extern IntPtr GetProcessWindowStation();
-              [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-              public static extern bool GetUserObjectInformation(IntPtr handle, int index, ref Flags flags, uint size, out uint needed);
-              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
-              [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-              [DllImport("user32.dll", SetLastError = true)] public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
-              [DllImport("user32.dll", SetLastError = true)] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
-              [DllImport("user32.dll", SetLastError = true)] public static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
-              [DllImport("user32.dll", SetLastError = true)]
-              public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
-              [DllImport("user32.dll", SetLastError = true)]
-              public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam);
+          & rustfmt --check --edition 2024 --config skip_children=true crates/fs/src/fs.rs crates/extension_host/src/extension_host.rs
+          if ($LASTEXITCODE -ne 0) { throw 'Corrected source formatting failed.' }
+      - name: Install missing documented Linux prerequisites
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! pkg-config --exists alsa fontconfig glib-2.0 openssl libva wayland-client xkbcommon xkbcommon-x11 libzstd sqlite3 \
+            || ! command -v clang >/dev/null \
+            || ! command -v cmake >/dev/null \
+            || ! command -v ld.lld >/dev/null; then
+            script/linux
+          fi
+          df -h .
+          free -h
+      - name: Select supported Linux C++ compiler and linker
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v clang-18
+          command -v clang++-18
+          command -v ld.lld
+          clang++-18 --version
+          printf '%s\n' 'CC=clang-18' 'CXX=clang++-18' \
+            'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=clang-18' \
+            'RUSTFLAGS=-C symbol-mangling-version=v0 --cfg tokio_unstable -C link-arg=-fuse-ld=lld' \
+            >> "$GITHUB_ENV"
+      - name: Cache Cargo sources only
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-${{ runner.arch }}-
+      - name: Run complete ACP, flag, and UI suites
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Remove-Item Env:ZED_DISABLE_STAFF -ErrorAction SilentlyContinue
+          & cargo test -j 1 -p agent_servers -p feature_flags -p settings_ui --lib --locked -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath hosted-test-evidence/full-suites.log
+          if ($LASTEXITCODE -ne 0) { throw "Complete relevant suites failed: $LASTEXITCODE" }
+          $results = Select-String hosted-test-evidence/full-suites.log -Pattern 'test result: ok\. ([1-9][0-9]*) passed; 0 failed'
+          if (@($results).Count -ne 3) { throw 'Expected three genuinely executed nonempty complete suites.' }
+          if (git status --porcelain --untracked-files=no) { throw 'Tests modified tracked source.' }
+      - name: Execute deterministic Windows atomic-replacement regressions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & cargo test -j 1 --locked -p fs --lib atomic_replace_tests -- --nocapture --test-threads=1 2>&1 |
+            Tee-Object -FilePath hosted-test-evidence/windows-atomic-replacement.log
+          if ($LASTEXITCODE -ne 0) { throw "Windows replacement regressions failed: $LASTEXITCODE" }
+          $log = Get-Content hosted-test-evidence/windows-atomic-replacement.log -Raw
+          foreach ($name in @(
+            'missing_replacement_does_not_create_empty_destination',
+            'locked_replacement_does_not_publish_empty_state_and_can_retry',
+            'failed_replacement_preserves_existing_catalog_state',
+            'concurrent_create_retries_replace_and_preserves_winner_on_failure'
+          )) {
+            if ($log -notmatch ([Regex]::Escape($name) + ' .*ok')) { throw "Windows replacement assertion missing: $name" }
           }
-          '@
-          $exe = Join-Path $env:RUNNER_TEMP 'rp127-delivered-portable\Zed.exe'
-          $profile = Join-Path $env:RUNNER_TEMP 'rp127-synthetic-profile'
-          $workspace = Join-Path $env:RUNNER_TEMP 'rp127-synthetic-workspace'
-          $evidence = (Resolve-Path runtime-evidence).Path
-          $gui = [ordered]@{
-            source = $env:EXPECTED_SOURCE; canonical_run = 42872582412; run_id = $env:GITHUB_RUN_ID
-            profile_kind = 'Fresh synthetic hosted data only, not a copied private profile'
-            stateless = $true; presentation = 'HWND swapchain, D3D11 still required; no force-WARP flag'
-            owner_acceptance = $false; wsl_runtime_tested = $false
-            visible_window_station = $false; passes = @(); status = 'not_started'
+          if ($log -notmatch 'test result: ok\. 4 passed; 0 failed; 0 ignored') {
+            throw 'Expected all four genuinely executed Windows replacement regressions.'
           }
-          $script:process = $null
-          $script:stdout = $null
-          $script:stderr = $null
-          $script:pass = 0
-          function Read-Log {
-            $path = Join-Path $profile 'logs\Zed.log'
-            if (-not (Test-Path -LiteralPath $path)) { return '' }
-            $stream = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
-            try {
-              $reader = [IO.StreamReader]::new($stream)
-              try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
-            } finally { $stream.Dispose() }
+      - name: Execute real-filesystem atomic-write integration
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & cargo test -j 1 --locked -p fs --features test-support --test integration test_realfs_atomic_write -- --nocapture --test-threads=1 2>&1 |
+            Tee-Object -FilePath hosted-test-evidence/realfs-atomic-write.log
+          if ($LASTEXITCODE -ne 0) { throw "Real filesystem integration failed: $LASTEXITCODE" }
+          $log = Get-Content hosted-test-evidence/realfs-atomic-write.log -Raw
+          if ($log -notmatch 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored') {
+            throw 'Real filesystem atomic-write integration did not genuinely execute.'
           }
-          function Owned-Window {
-            $script:process.Refresh()
-            if ($script:process.HasExited) { throw 'Owned GUI process exited before completing the smoke.' }
-            $actual = Get-CimInstance Win32_Process -Filter "ProcessId = $($script:process.Id)"
-            if ($actual.ExecutablePath -ine $exe -or -not $actual.CommandLine.Contains($profile)) {
-              throw 'Owned GUI executable/profile identity mismatch.'
-            }
-            $window = $script:process.MainWindowHandle
-            [uint32]$owner = 0
-            [void][RpGui]::GetWindowThreadProcessId($window, [ref]$owner)
-            if ($window -eq [IntPtr]::Zero -or $owner -ne $script:process.Id -or
-                -not [RpGui]::IsWindowVisible($window)) { throw 'An owned visible GUI window is required.' }
-            return $window
+      - name: Execute catalog rollback and conflict guards
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & cargo test -j 1 --locked -p extension_host --lib rp_extension_catalog -- --nocapture --test-threads=1 2>&1 |
+            Tee-Object -FilePath hosted-test-evidence/catalog-guards.log
+          if ($LASTEXITCODE -ne 0) { throw "Catalog guards failed: $LASTEXITCODE" }
+          $log = Get-Content hosted-test-evidence/catalog-guards.log -Raw
+          if ($log -notmatch 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored') {
+            throw 'Catalog rollback/conflict tests did not genuinely execute.'
           }
-          function Key([uint32]$Code, [int64]$Scan) {
-            $window = Owned-Window
-            if (-not [RpGui]::PostMessage($window, 0x100, [UIntPtr]$Code, [IntPtr](($Scan -shl 16) -bor 1L)) -or
-                -not [RpGui]::PostMessage($window, 0x101, [UIntPtr]$Code, [IntPtr](($Scan -shl 16) -bor 0xC0000001L))) {
-              throw 'Unable to queue a key only to the owned GUI window.'
-            }
+      - name: Execute nonstaff ACP, native MCP, fallback, and new UI assertions
+        shell: pwsh
+        env:
+          ZED_DISABLE_STAFF: "1"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          & cargo test -j 1 -p agent_servers -p feature_flags -p settings_ui --lib --locked -- acp_beta native_mcp v2_request_ids selection_tests --test-threads=1 2>&1 |
+            Tee-Object -FilePath hosted-test-evidence/nonstaff-focused.log
+          if ($LASTEXITCODE -ne 0) { throw "Nonstaff suites failed: $LASTEXITCODE" }
+          $log = Get-Content hosted-test-evidence/nonstaff-focused.log -Raw
+          foreach ($name in @(
+            'acp_beta_experimental_setting_is_searchable_and_user_scoped',
+            'acp_beta_persists_override_and_reset_restores_rollout',
+            'acp_beta_creates_existing_string_setting_without_other_flags'
+          )) {
+            if ($log -notmatch ([Regex]::Escape($name) + ' .*ok')) { throw "UI assertion missing: $name" }
           }
-          function Capture([string]$Name) {
-            $window = Owned-Window
-            $rect = [RpGui+Rect]::new()
-            if (-not [RpGui]::GetWindowRect($window, [ref]$rect)) { throw 'Owned window dimensions unavailable.' }
-            $width = $rect.Right - $rect.Left; $height = $rect.Bottom - $rect.Top
-            if ($width -lt 100 -or $height -lt 100) { throw 'Owned GUI capture is too small.' }
-            $image = [Drawing.Bitmap]::new($width, $height)
-            $graphics = [Drawing.Graphics]::FromImage($image)
-            try {
-              $hdc = $graphics.GetHdc()
-              try {
-                if (-not [RpGui]::PrintWindow($window, $hdc, 2)) { throw 'Owned window capture failed.' }
-              } finally { $graphics.ReleaseHdc($hdc) }
-              $colors = [Collections.Generic.HashSet[int]]::new()
-              for ($y = 0; $y -lt $height; $y += 8) {
-                for ($x = 0; $x -lt $width; $x += 8) { [void]$colors.Add($image.GetPixel($x, $y).ToArgb()) }
-              }
-              $image.Save((Join-Path $evidence $Name), [Drawing.Imaging.ImageFormat]::Png)
-              if ($colors.Count -lt 16) { throw 'Owned capture lacks rendered color variation.' }
-            } finally { $graphics.Dispose(); $image.Dispose() }
+          if ($log -notmatch 'selection_tests::.* \.\.\. ok') { throw 'Platform fallback/selection tests did not execute.' }
+          if (@([Regex]::Matches($log, 'test result: ok\. [1-9][0-9]* passed; 0 failed')).Count -ne 3) {
+            throw 'Expected three nonempty nonstaff suites.'
           }
-          function Trust-SyntheticFixture {
-            $window = Owned-Window
-            $rect = [RpGui+Rect]::new()
-            $origin = [RpGui+Point]::new()
-            if (-not [RpGui]::GetWindowRect($window, [ref]$rect) -or
-                -not [RpGui]::ClientToScreen($window, [ref]$origin)) { throw 'Owned click coordinates unavailable.' }
-            # Position measured from the actual synthetic-only trust-dialog capture.
-            $x = [int](($rect.Right - $rect.Left) * 0.714) + $rect.Left - $origin.X
-            $y = [int](($rect.Bottom - $rect.Top) * 0.468) + $rect.Top - $origin.Y
-            if ($x -lt 0 -or $y -lt 0 -or $x -ge $rect.Right - $rect.Left -or $y -ge $rect.Bottom - $rect.Top) {
-              throw 'Synthetic trust click would be outside the owned window.'
-            }
-            $position = [IntPtr](($y -shl 16) -bor $x)
-            foreach ($event in @(@{ message = 0x200; buttons = 0 }, @{ message = 0x201; buttons = 1 }, @{ message = 0x202; buttons = 0 })) {
-              if (-not [RpGui]::PostMessage($window, $event.message, [UIntPtr]$event.buttons, $position)) {
-                throw 'Unable to click only the owned synthetic project trust dialog.'
-              }
-            }
-          }
-          function Close-Owned {
-            if ($null -eq $script:process) { return }
-            if (-not $script:process.HasExited) {
-              if (-not $script:process.CloseMainWindow() -or -not $script:process.WaitForExit(15000)) {
-                Stop-Process -Id $script:process.Id
-                [void]$script:process.WaitForExit(5000)
-                throw 'Owned synthetic GUI failed to close gracefully within 15 seconds.'
-              }
-            }
-            if (-not $script:stdout.Wait(5000) -or -not $script:stderr.Wait(5000)) { throw 'Owned GUI output did not close.' }
-            [IO.File]::WriteAllText((Join-Path $evidence "gui-$script:pass.stdout.log"), $script:stdout.Result)
-            [IO.File]::WriteAllText((Join-Path $evidence "gui-$script:pass.stderr.log"), $script:stderr.Result)
-            $script:process.Dispose(); $script:process = $null
-          }
-          try {
-            $flags = [RpGui+Flags]::new(); [uint32]$needed = 0
-            if (-not [RpGui]::GetUserObjectInformation([RpGui]::GetProcessWindowStation(), 1, [ref]$flags, 12, [ref]$needed)) {
-              throw 'Unable to inspect hosted window station.'
-            }
-            $gui.visible_window_station = ($flags.Value -band 1) -ne 0
-            if (-not $gui.visible_window_station) {
-              throw 'Hosted runner has no interactive visible window station; GUI not launched, no GUI pass claimed.'
-            }
-            New-Item -ItemType Directory -Path "$profile\config", $workspace | Out-Null
-            @{
-              auto_update = $false; disable_ai = $true; restore_on_startup = 'none'
-              telemetry = @{ diagnostics = $false; metrics = $false }
-              context_servers = @{}; agent_servers = @{}
-            } | ConvertTo-Json -Depth 4 | Set-Content "$profile\config\settings.json" -Encoding utf8NoBOM
-            '[{"bindings":{"f7":["pane::ActivateItem",0],"f8":"editor::MoveToEnd","f9":"workspace::Save"}}]' |
-              Set-Content "$profile\config\keymap.json" -Encoding utf8NoBOM
-            $fixture = Join-Path $workspace 'hosted-fixture.txt'
-            [IO.File]::WriteAllText($fixture, 'Hosted RP 1.27 fixture.')
-            $expectedText = "Hosted RP 1.27 fixture. Saved by hosted UI.`r`n"
-            for ($script:pass = 1; $script:pass -le 2; $script:pass++) {
-              $before = Read-Log
-              $start = [Diagnostics.ProcessStartInfo]::new($exe)
-              $start.UseShellExecute = $false; $start.WorkingDirectory = $workspace
-              $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
-              $start.Environment.Clear()
-              foreach ($name in @('SystemRoot','SystemDrive','WINDIR','TEMP','TMP','PATH','USERPROFILE',
-                  'LOCALAPPDATA','APPDATA','ProgramData','ProgramFiles','ProgramFiles(x86)','USERNAME','USERDOMAIN',
-                  'COMSPEC','PATHEXT','PSModulePath','HOMEDRIVE','HOMEPATH','PUBLIC','NUMBER_OF_PROCESSORS')) {
-                $value = [Environment]::GetEnvironmentVariable($name)
-                if ($value) { $start.Environment[$name] = $value }
-              }
-              $start.Environment['ZED_STATELESS'] = '1'
-              $start.Environment['ZED_DISABLE_STAFF'] = '1'
-              $start.Environment['ZED_ALLOW_EMULATED_GPU'] = '1'
-              $start.Environment['GPUI_DISABLE_DIRECT_COMPOSITION'] = '1'
-              $start.Environment['ZED_UPDATE_EXPLANATION'] = 'Synthetic hosted smoke: updater disabled'
-              $start.Environment['RUST_LOG'] = 'info'
-              foreach ($argument in @('--foreground', '--user-data-dir', $profile, $fixture)) {
-                $start.ArgumentList.Add($argument)
-              }
-              $script:process = [Diagnostics.Process]::Start($start)
-              $script:stdout = $script:process.StandardOutput.ReadToEndAsync()
-              $script:stderr = $script:process.StandardError.ReadToEndAsync()
-              $deadline = [DateTime]::UtcNow.AddSeconds(50)
-              do {
-                $script:process.Refresh()
-                if ($script:process.HasExited) { throw 'Hosted GUI process exited before rendering.' }
-                $log = Read-Log
-                $newLog = if ($log.Length -ge $before.Length) { $log.Substring($before.Length) } else { $log }
-                if ($newLog -match 'starting headless|failed to initialize DirectX|panicked at') {
-                  throw "Hosted GUI did not initialize a renderer: $newLog"
-                }
-                if ($newLog.Contains('Rendered first frame') -and $script:process.MainWindowHandle -ne [IntPtr]::Zero) { break }
-                Start-Sleep -Milliseconds 250
-              } while ([DateTime]::UtcNow -lt $deadline)
-              if (-not $newLog.Contains('Rendered first frame')) { throw 'No genuine rendered frame before the 50-second deadline.' }
-              $window = Owned-Window
-              if (-not [RpGui]::SetWindowPos($window, [IntPtr]::Zero, 0, 0, 1280, 900, 0x0014)) {
-                throw 'Unable to size only the owned GUI window.'
-              }
-              Start-Sleep -Milliseconds 500
-              Capture "gui-$script:pass-rendered.png"
-              Trust-SyntheticFixture
-              Start-Sleep -Milliseconds 500
-              Key 0x76 0x41
-              Start-Sleep -Milliseconds 500
-              Capture "gui-$script:pass-fixture.png"
-              if ($script:pass -eq 1) {
-                Key 0x77 0x42
-                Start-Sleep -Milliseconds 200
-                foreach ($character in ' Saved by hosted UI.'.ToCharArray()) {
-                  if (-not [RpGui]::PostMessage($window, 0x102, [UIntPtr][uint32]$character, [IntPtr]1)) {
-                    throw 'Unable to queue synthetic text to the owned GUI window.'
-                  }
-                }
-                Key 0x78 0x43
-                $deadline = [DateTime]::UtcNow.AddSeconds(10)
-                do {
-                  if ([IO.File]::ReadAllText($fixture) -ceq $expectedText) { break }
-                  Start-Sleep -Milliseconds 250
-                } while ([DateTime]::UtcNow -lt $deadline)
-                if ([IO.File]::ReadAllText($fixture) -cne $expectedText) {
-                  throw 'Owned GUI did not save the exact synthetic edited fixture.'
-                }
-                Capture 'gui-1-edited-saved.png'
-              } elseif ([IO.File]::ReadAllText($fixture) -cne $expectedText) {
-                throw 'Synthetic saved fixture did not persist across a fresh GUI process.'
-              }
-              $gui.passes += @{ pass = $script:pass; process_id = $script:process.Id; visible_owned_window = $true; rendered = $true }
-              Close-Owned
-            }
-            $gui.status = 'passed'
-            $gui.saved_fixture_sha256 = (Get-FileHash $fixture -Algorithm SHA256).Hash.ToLowerInvariant()
-            $source = Get-Content runtime-evidence/source.json -Raw | ConvertFrom-Json
-            $source.gui_runtime_tested = $true
-            $source | ConvertTo-Json | Set-Content runtime-evidence/source.json -Encoding utf8NoBOM
-          } catch {
-            $gui.status = 'failed'
-            $gui.error = $_.Exception.Message
-            throw
-          } finally {
-            try { Close-Owned } finally {
-              $gui | ConvertTo-Json -Depth 6 | Set-Content runtime-evidence/gui.json -Encoding utf8NoBOM
-              [IO.File]::WriteAllText((Join-Path $evidence 'synthetic-zed.log'), (Read-Log))
-              if (Test-Path -LiteralPath "$workspace\hosted-fixture.txt") {
-                Copy-Item -LiteralPath "$workspace\hosted-fixture.txt" -Destination "$evidence\hosted-fixture.txt"
-              }
-              $catalogState = Join-Path $profile 'extensions\rp-catalog-state.json'
-              if (Test-Path -LiteralPath $catalogState) {
-                Get-Item -LiteralPath $catalogState | Select-Object Length |
-                  ConvertTo-Json | Set-Content runtime-evidence/catalog-state-file.json -Encoding utf8NoBOM
-              }
-            }
-          }
-      - name: Preserve source-bound Windows runtime evidence
+          if (git status --porcelain --untracked-files=no) { throw 'Tests modified tracked source.' }
+      - name: Set up required Node runtime for pinned adapter
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - name: Build only the existing ACP smoke test executable
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -j 1 -p agent_servers --lib --locked --no-run --message-format=json \
+            > hosted-test-evidence/compiler-artifacts.jsonl \
+            2> >(tee hosted-test-evidence/compile.log >&2)
+          python3 - <<'PY'
+          import json, pathlib
+          messages = [json.loads(line) for line in pathlib.Path("hosted-test-evidence/compiler-artifacts.jsonl").read_text().splitlines()]
+          binaries = [m["executable"] for m in messages if m.get("reason") == "compiler-artifact" and m.get("target", {}).get("name") == "agent_servers" and m.get("profile", {}).get("test") and m.get("executable")]
+          if len(binaries) != 1:
+              raise RuntimeError(f"Expected one ACP test executable, found {binaries!r}")
+          pathlib.Path("hosted-test-evidence/test-executable.txt").write_text(binaries[0] + "\n")
+          PY
+      - name: Prewarm exact anonymous adapter package outside handshake timeouts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          isolated_home="$RUNNER_TEMP/rp-adapter-smoke-home"
+          isolated_tmp="$RUNNER_TEMP/rp-adapter-smoke-tmp"
+          mkdir "$isolated_home" "$isolated_tmp"
+          timeout --signal=TERM --kill-after=15s 300s env -i \
+            HOME="$isolated_home" TMPDIR="$isolated_tmp" PATH="$PATH" \
+            npx --yes @agentclientprotocol/claude-agent-acp@0.94.0 --version \
+            2>&1 | tee hosted-test-evidence/pinned-adapter-version.log
+          grep -Fx '0.94.0' hosted-test-evidence/pinned-adapter-version.log
+      - name: Run exact pinned adapter smoke without inherited credentials
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          isolated_home="$RUNNER_TEMP/rp-adapter-smoke-home"
+          isolated_tmp="$RUNNER_TEMP/rp-adapter-smoke-tmp"
+          test -d "$isolated_home"
+          test -d "$isolated_tmp"
+          binary="$(cat hosted-test-evidence/test-executable.txt)"
+          test -x "$binary"
+          timeout --signal=TERM --kill-after=15s 180s env -i \
+            HOME="$isolated_home" TMPDIR="$isolated_tmp" PATH="$PATH" \
+            ZED_HEADLESS=1 ZED_DISABLE_STAFF=1 SEED=0 ITERATIONS=1 \
+            "$binary" acp::selection_tests::claude_adapter_initialize_smoke \
+            --ignored --exact --nocapture --test-threads=1 \
+            2>&1 | tee hosted-test-evidence/real-adapter-smoke.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' \
+            hosted-test-evidence/real-adapter-smoke.log
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Preserve source-bound test logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rp-127-synthetic-windows-gui-e27be8d21bbc2c756732280d1730e69039c7fdb3
-          path: runtime-evidence/
+          name: rp-127-supplemental-tests-${{ matrix.os }}-${{ env.EXPECTED_SOURCE }}
+          path: hosted-test-evidence/
           if-no-files-found: error
           retention-days: 7
