@@ -3704,26 +3704,114 @@ async fn file_id(path: impl AsRef<Path>) -> Result<u64> {
 }
 
 #[cfg(target_os = "windows")]
-fn atomic_replace<P: AsRef<Path>>(
-    replaced_file: P,
-    replacement_file: P,
-) -> windows::core::Result<()> {
+fn atomic_replace<P: AsRef<Path>>(replaced_file: P, replacement_file: P) -> io::Result<()> {
     use windows::{
         Win32::Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW},
         core::HSTRING,
     };
 
-    // If the file does not exist, create it.
-    let _ = std::fs::File::create_new(replaced_file.as_ref());
+    let replace = || {
+        unsafe {
+            ReplaceFileW(
+                &HSTRING::from(replaced_file.as_ref().to_string_lossy().into_owned()),
+                &HSTRING::from(replacement_file.as_ref().to_string_lossy().into_owned()),
+                None,
+                REPLACE_FILE_FLAGS::default(),
+                None,
+                None,
+            )
+        }
+        .map_err(|_| io::Error::last_os_error())
+    };
 
-    unsafe {
-        ReplaceFileW(
-            &HSTRING::from(replaced_file.as_ref().to_string_lossy().into_owned()),
-            &HSTRING::from(replacement_file.as_ref().to_string_lossy().into_owned()),
-            None,
-            REPLACE_FILE_FLAGS::default(),
-            None,
-            None,
-        )
+    match replace() {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Publishing an empty placeholder here leaves corrupt state if replacement fails.
+            match rename_without_replace(replacement_file.as_ref(), replaced_file.as_ref()) {
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => replace(),
+                result => result,
+            }
+        }
+        result => result,
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod atomic_replace_tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::sync::Barrier;
+
+    #[test]
+    fn missing_replacement_does_not_create_empty_destination() {
+        let directory = TempDir::new().unwrap();
+        let destination = directory.path().join("rp-catalog-state.json");
+        let replacement = directory.path().join("missing");
+
+        assert!(atomic_replace(&destination, &replacement).is_err());
+        assert!(!destination.try_exists().unwrap());
+    }
+
+    #[test]
+    fn locked_replacement_does_not_publish_empty_state_and_can_retry() {
+        let directory = TempDir::new().unwrap();
+        let destination = directory.path().join("rp-catalog-state.json");
+        let replacement = directory.path().join("replacement");
+        let state = r#"{"revision":100,"digest":"accepted"}"#;
+        std::fs::write(&replacement, state).unwrap();
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&replacement)
+            .unwrap();
+
+        assert!(atomic_replace(&destination, &replacement).is_err());
+        assert!(!destination.try_exists().unwrap());
+        drop(locked);
+
+        atomic_replace(&destination, &replacement).unwrap();
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), state);
+    }
+
+    #[test]
+    fn failed_replacement_preserves_existing_catalog_state() {
+        let directory = TempDir::new().unwrap();
+        let destination = directory.path().join("rp-catalog-state.json");
+        let replacement = directory.path().join("missing");
+        let state = r#"{"revision":100,"digest":"accepted"}"#;
+        std::fs::write(&destination, state).unwrap();
+
+        assert!(atomic_replace(&destination, &replacement).is_err());
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), state);
+    }
+
+    #[test]
+    fn concurrent_first_writes_publish_complete_state() {
+        for _ in 0..16 {
+            let directory = TempDir::new().unwrap();
+            let destination = directory.path().join("rp-catalog-state.json");
+            let barrier = Arc::new(Barrier::new(4));
+            let mut writers = Vec::new();
+            for revision in 100..104 {
+                let destination = destination.clone();
+                let replacement = directory.path().join(format!("replacement-{revision}"));
+                let state = format!(r#"{{"revision":{revision},"digest":"accepted"}}"#);
+                std::fs::write(&replacement, &state).unwrap();
+                let barrier = barrier.clone();
+                writers.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    atomic_replace(&destination, &replacement)
+                }));
+            }
+            let mut results = Vec::new();
+            for writer in writers {
+                results.push(writer.join().unwrap());
+            }
+            assert!(results.iter().any(Result::is_ok), "{results:?}");
+            let state: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
+            assert!((100..104).contains(&state["revision"].as_u64().unwrap()));
+            assert_eq!(state["digest"], "accepted");
+        }
     }
 }
