@@ -202,7 +202,7 @@ jobs:
             '[{"bindings":{"f7":["pane::ActivateItem",0],"f8":"editor::MoveToEnd","f9":"workspace::Save"}}]' |
               Set-Content "$profile\config\keymap.json" -Encoding utf8NoBOM
             $fixture = Join-Path $workspace 'hosted-fixture.txt'
-            [IO.File]::WriteAllText($fixture, "Hosted RP 1.27 fixture.`n")
+            [IO.File]::WriteAllText($fixture, 'Hosted RP 1.27 fixture.')
             for ($script:pass = 1; $script:pass -le 2; $script:pass++) {
               $before = Read-Log
               $start = [Diagnostics.ProcessStartInfo]::new($exe)
