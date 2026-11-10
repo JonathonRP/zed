@@ -5456,6 +5456,8 @@ pub mod test {
         let window = cx.add_empty_window();
         window.update(|window, cx| {
             register_settings(cx);
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state, cx);
             cx.set_global(feature_flags::FeatureFlagStore::default());
             init_renderers(cx);
             let pages = page_data::settings_data(cx);
@@ -5477,35 +5479,38 @@ pub mod test {
                     .contains_key(&AnySettingField::type_id(item.field.as_ref()))
             );
 
-            let mut settings_window = SettingsWindow::test(window, cx);
-            settings_window.pages = vec![experimental];
-            settings_window.build_search_index();
-            assert_eq!(
-                settings_window.filter_by_json_path("#feature_flags.acp-beta"),
-                vec![1],
-            );
-            let index = settings_window.search_index.as_ref().expect("search index");
-            let words = &index.documents[1].words;
-            for word in [
-                "experimental",
-                "external",
-                "agents",
-                "acp",
-                "v2",
-                "beta",
-                "mcp",
-            ] {
-                assert!(words.iter().any(|candidate| candidate == word), "{word}");
-            }
-            for file in [SettingsUiFile::User, SettingsUiFile::Server("test")] {
-                settings_window.current_file = file.clone();
-                settings_window.build_filter_table();
-                settings_window.filter_matches_to_file();
+            cx.new(|cx| {
+                let mut settings_window = SettingsWindow::test(window, cx);
+                settings_window.pages = vec![experimental];
+                settings_window.build_search_index();
                 assert_eq!(
-                    settings_window.filter_table[0],
-                    vec![file == SettingsUiFile::User; 2],
+                    settings_window.filter_by_json_path("#feature_flags.acp-beta"),
+                    vec![1],
                 );
-            }
+                let index = settings_window.search_index.as_ref().expect("search index");
+                let words = &index.documents[1].words;
+                for word in [
+                    "experimental",
+                    "external",
+                    "agents",
+                    "acp",
+                    "v2",
+                    "beta",
+                    "mcp",
+                ] {
+                    assert!(words.iter().any(|candidate| candidate == word), "{word}");
+                }
+                for file in [SettingsUiFile::User, SettingsUiFile::Server("test")] {
+                    settings_window.current_file = file.clone();
+                    settings_window.build_filter_table();
+                    settings_window.filter_matches_to_file();
+                    assert_eq!(
+                        settings_window.filter_table[0],
+                        vec![file == SettingsUiFile::User; 2],
+                    );
+                }
+                settings_window
+            });
         });
     }
 
