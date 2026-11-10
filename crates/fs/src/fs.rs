@@ -3710,24 +3710,33 @@ fn atomic_replace<P: AsRef<Path>>(replaced_file: P, replacement_file: P) -> io::
         core::HSTRING,
     };
 
-    let replace = || {
-        unsafe {
-            ReplaceFileW(
-                &HSTRING::from(replaced_file.as_ref().to_string_lossy().into_owned()),
-                &HSTRING::from(replacement_file.as_ref().to_string_lossy().into_owned()),
-                None,
-                REPLACE_FILE_FLAGS::default(),
-                None,
-                None,
-            )
-        }
-        .map_err(|_| io::Error::last_os_error())
-    };
+    atomic_replace_or_create(
+        || {
+            unsafe {
+                ReplaceFileW(
+                    &HSTRING::from(replaced_file.as_ref().to_string_lossy().into_owned()),
+                    &HSTRING::from(replacement_file.as_ref().to_string_lossy().into_owned()),
+                    None,
+                    REPLACE_FILE_FLAGS::default(),
+                    None,
+                    None,
+                )
+            }
+            .map_err(|_| io::Error::last_os_error())
+        },
+        || rename_without_replace(replacement_file.as_ref(), replaced_file.as_ref()),
+    )
+}
 
+#[cfg(target_os = "windows")]
+fn atomic_replace_or_create(
+    mut replace: impl FnMut() -> io::Result<()>,
+    create: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
     match replace() {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             // Publishing an empty placeholder here leaves corrupt state if replacement fails.
-            match rename_without_replace(replacement_file.as_ref(), replaced_file.as_ref()) {
+            match create() {
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => replace(),
                 result => result,
             }
@@ -3740,7 +3749,6 @@ fn atomic_replace<P: AsRef<Path>>(replaced_file: P, replacement_file: P) -> io::
 mod atomic_replace_tests {
     use super::*;
     use std::os::windows::fs::OpenOptionsExt as _;
-    use std::sync::Barrier;
 
     #[test]
     fn missing_replacement_does_not_create_empty_destination() {
@@ -3786,32 +3794,46 @@ mod atomic_replace_tests {
     }
 
     #[test]
-    fn concurrent_first_writes_publish_complete_state() {
-        for _ in 0..16 {
+    fn concurrent_create_retries_replace_and_preserves_winner_on_failure() {
+        for fail_retry in [false, true] {
             let directory = TempDir::new().unwrap();
             let destination = directory.path().join("rp-catalog-state.json");
-            let barrier = Arc::new(Barrier::new(4));
-            let mut writers = Vec::new();
-            for revision in 100..104 {
-                let destination = destination.clone();
-                let replacement = directory.path().join(format!("replacement-{revision}"));
-                let state = format!(r#"{{"revision":{revision},"digest":"accepted"}}"#);
-                std::fs::write(&replacement, &state).unwrap();
-                let barrier = barrier.clone();
-                writers.push(std::thread::spawn(move || {
-                    barrier.wait();
-                    atomic_replace(&destination, &replacement)
-                }));
-            }
-            let mut results = Vec::new();
-            for writer in writers {
-                results.push(writer.join().unwrap());
-            }
-            assert!(results.iter().any(Result::is_ok), "{results:?}");
-            let state: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(&destination).unwrap()).unwrap();
-            assert!((100..104).contains(&state["revision"].as_u64().unwrap()));
-            assert_eq!(state["digest"], "accepted");
+            let replacement = directory.path().join("replacement");
+            let previous = r#"{"revision":100,"digest":"accepted"}"#;
+            let next = r#"{"revision":101,"digest":"next"}"#;
+            std::fs::write(&replacement, next).unwrap();
+            let mut replace_calls = 0;
+
+            let result = atomic_replace_or_create(
+                || {
+                    replace_calls += 1;
+                    if replace_calls == 1 {
+                        Err(io::ErrorKind::NotFound.into())
+                    } else {
+                        atomic_replace(&destination, &replacement)
+                    }
+                },
+                || {
+                    // A second writer wins creation after the first replace saw no destination.
+                    std::fs::write(&destination, previous)?;
+                    let result = rename_without_replace(&replacement, &destination);
+                    assert_eq!(
+                        result.as_ref().unwrap_err().kind(),
+                        io::ErrorKind::AlreadyExists
+                    );
+                    if fail_retry {
+                        std::fs::remove_file(&replacement)?;
+                    }
+                    result
+                },
+            );
+
+            assert_eq!(replace_calls, 2);
+            assert_eq!(result.is_err(), fail_retry);
+            assert_eq!(
+                std::fs::read_to_string(&destination).unwrap(),
+                if fail_retry { previous } else { next }
+            );
         }
     }
 }
