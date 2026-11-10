@@ -154,8 +154,22 @@ jobs:
             Tee-Object -FilePath hosted-test-evidence/catalog-guards.log
           if ($LASTEXITCODE -ne 0) { throw "Catalog guards failed: $LASTEXITCODE" }
           $log = Get-Content hosted-test-evidence/catalog-guards.log -Raw
-          if ($log -notmatch 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored') {
-            throw 'Catalog rollback/conflict tests did not genuinely execute.'
+          foreach ($name in @(
+            'dynamic_revision_rejects_rollback_and_equal_conflict',
+            'catalog_integrity_correspondence_is_fail_closed',
+            'digest_first_refresh_reuses_snapshot_and_accepts_changed_digest',
+            'update_selection_only_advances_semver_within_authority'
+          )) {
+            if ($log -notmatch ([Regex]::Escape($name) + ' .*ok')) { throw "Catalog guard missing: $name" }
+          }
+          foreach ($name in @(
+            'validates_live_catalog_fixture_without_pinning_snapshot_identity',
+            'validates_and_stages_live_rp_archive_in_isolation'
+          )) {
+            if ($log -notmatch ([Regex]::Escape($name) + ' .*ignored')) { throw "External fixture skip not accounted for: $name" }
+          }
+          if ($log -notmatch 'test result: ok\. [1-9][0-9]* passed; 0 failed; 2 ignored') {
+            throw 'Catalog guards did not execute with exactly the two existing external-fixture ignores.'
           }
       - name: Execute nonstaff ACP, native MCP, fallback, and new UI assertions
         shell: pwsh
