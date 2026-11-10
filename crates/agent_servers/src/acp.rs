@@ -1142,7 +1142,7 @@ fn handle_v2_complete_elicitation(
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod selection_tests {
     use super::*;
     use gpui::{TestAppContext, UpdateGlobal as _};
@@ -1250,9 +1250,10 @@ mod selection_tests {
             });
             let trace = directory.path().join("connections");
             std::fs::write(&trace, "").expect("clear trace");
-            let command = AgentServerCommand {
-                path: "/bin/sh".into(),
-                args: vec!["-c".into(), r#"
+            #[cfg(unix)]
+            let (path, args) = (
+                "/bin/sh".into(),
+                vec!["-c".into(), r#"
 printf 'start %s\n' "$$" >> "$ACP_SELECTION_TRACE"
 while IFS= read -r request; do
     case "$request" in
@@ -1275,10 +1276,52 @@ while IFS= read -r request; do
     esac
 done
 "#.into()],
+            );
+            #[cfg(windows)]
+            let (path, args) = (
+                "powershell.exe".into(),
+                vec![
+                    "-NoLogo".into(),
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    r#"
+$ErrorActionPreference = 'Stop'
+[IO.File]::AppendAllText($env:ACP_SELECTION_TRACE, "start $PID`n")
+while ($line = [Console]::In.ReadLine()) {
+    $request = ConvertFrom-Json -InputObject $line
+    if ($request.method -ne 'initialize') { continue }
+    $version = if ($request.params.protocolVersion -eq 2) { 2 } else { 1 }
+    [IO.File]::AppendAllText($env:ACP_SELECTION_TRACE, "initialize $version`n")
+    $response = if ($version -eq 2) {
+        $env:ACP_SELECTION_RESPONSE
+    } else {
+        '"result":{"protocolVersion":1,"agentCapabilities":{},"agentInfo":{"name":"selected-v1","version":"1"}}'
+    }
+    if ($response) {
+        $id = ConvertTo-Json -InputObject $request.id -Compress
+        [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":' + $id + ',' + $response + '}')
+        [Console]::Out.Flush()
+    }
+    if ($version -eq 2 -and $env:ACP_SELECTION_EXIT -eq '1') { exit 7 }
+}
+"#
+                    .into(),
+                ],
+            );
+            let command = AgentServerCommand {
+                path,
+                args,
                 env: Some(HashMap::from_iter([
-                    ("ACP_SELECTION_TRACE".into(), trace.to_string_lossy().into_owned()),
+                    (
+                        "ACP_SELECTION_TRACE".into(),
+                        trace.to_string_lossy().into_owned(),
+                    ),
                     ("ACP_SELECTION_RESPONSE".into(), response.into()),
-                    ("ACP_SELECTION_EXIT".into(), if exit_after_response { "1" } else { "0" }.into()),
+                    (
+                        "ACP_SELECTION_EXIT".into(),
+                        if exit_after_response { "1" } else { "0" }.into(),
+                    ),
                 ])),
             };
             let connecting = cx.spawn({
@@ -1399,6 +1442,7 @@ done
     }
 
     #[gpui::test]
+    #[cfg(unix)]
     #[cfg_attr(not(feature = "e2e"), ignore)]
     async fn claude_adapter_initialize_smoke(cx: &mut TestAppContext) {
         cx.update(|cx| {
