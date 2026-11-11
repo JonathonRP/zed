@@ -79,6 +79,45 @@ jobs:
             wsl_runtime_tested = $false
             owner_acceptance = $false
           } | ConvertTo-Json | Set-Content runtime-evidence/source.json -Encoding utf8NoBOM
+      - name: Install signed public Microsoft WSL CLI only on the disposable runner
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Join-Path $env:RUNNER_TEMP 'wsl.3.0.5.0.x64.msi'
+          Invoke-WebRequest -Uri 'https://github.com/microsoft/WSL/releases/download/3.0.5/wsl.3.0.5.0.x64.msi' -OutFile $msi
+          $digest = (Get-FileHash $msi -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne '2313efc5873e3f8552f42e77f950fabd913c0289078fa89d2100f3421a525eaa') {
+            throw 'Microsoft WSL release428573057/asset690574807 MSI digest mismatch.'
+          }
+          $signature = Get-AuthenticodeSignature $msi
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw 'Expected valid Microsoft-published MSI signature.'
+          }
+          $install = [Diagnostics.ProcessStartInfo]::new("$env:WINDIR\System32\msiexec.exe")
+          $install.UseShellExecute = $false
+          $install.Environment.Clear()
+          foreach ($name in @('SystemRoot','SystemDrive','WINDIR','TEMP','TMP','PATH','USERPROFILE',
+              'LOCALAPPDATA','APPDATA','ProgramData','ProgramFiles','ProgramFiles(x86)',
+              'CommonProgramFiles','CommonProgramFiles(x86)','COMSPEC','PATHEXT')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { $install.Environment[$name] = $value }
+          }
+          foreach ($argument in @('/i',$msi,'/qn','/norestart')) { $install.ArgumentList.Add($argument) }
+          $process = [Diagnostics.Process]::Start($install)
+          try {
+            if (-not $process.WaitForExit(180000)) {
+              Stop-Process -Id $process.Id
+              throw 'Owned hosted WSL CLI installation exceeded 180 seconds.'
+            }
+            if ($process.ExitCode -ne 0) { throw "Hosted WSL MSI exited $($process.ExitCode); no reboot or pass assumed." }
+          } finally { $process.Dispose() }
+          $modern = Join-Path $env:ProgramFiles 'WSL\wsl.exe'
+          if (-not (Test-Path -LiteralPath $modern)) { throw 'Signed Microsoft WSL CLI not installed at expected path.' }
+          @{
+            release_id = 428573057; asset_id = 690574807; version = '3.0.5'
+            sha256 = $digest; signer = $signature.SignerCertificate.Subject
+            hosted_only = $true; installation_exit_code = 0; executable = $modern
+          } | ConvertTo-Json | Set-Content runtime-evidence/wsl-cli.json -Encoding utf8NoBOM
       - name: Download exact canonical Linux artifact for actual WSL transport
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -96,7 +135,7 @@ jobs:
             Set-Content runtime-evidence/wsl-feature.json -Encoding utf8NoBOM
           if ($feature.State -ne 'Enabled') { throw 'Hosted WSL1 feature is unavailable; no WSL runtime pass.' }
           function Invoke-Wsl([string[]]$Arguments, [string]$InputText = '', [int]$Seconds = 30) {
-            $start = [Diagnostics.ProcessStartInfo]::new("$env:WINDIR\System32\wsl.exe")
+            $start = [Diagnostics.ProcessStartInfo]::new("$env:ProgramFiles\WSL\wsl.exe")
             $start.UseShellExecute = $false
             $start.RedirectStandardInput = $true
             $start.RedirectStandardOutput = $true
@@ -126,6 +165,8 @@ jobs:
             } finally { $process.Dispose() }
           }
           $distro = 'RP127Hosted2d339'
+          Invoke-Wsl -Arguments @('--version') |
+            Set-Content runtime-evidence/wsl-cli-version.txt -Encoding utf8NoBOM
           $existing = Invoke-Wsl -Arguments @('--list','--quiet')
           if (($existing -split "\r?\n") -contains $distro) { throw 'Dedicated hosted distro already exists.' }
           $rootfs = Join-Path $env:RUNNER_TEMP 'rp127-ubuntu22-rootfs.tar.gz'
@@ -187,6 +228,9 @@ jobs:
           $serverVersion = Invoke-Wsl -Arguments @('--distribution',$distro,'--user','rphosted','--exec',
             "/home/rphosted/.zed_server/$serverName",'version')
           if ($serverVersion -cne '1.27.0') { throw "Actual WSL server version unexpected: $serverVersion" }
+          $nativeProbe = Invoke-Wsl -Arguments @('--distribution',$distro,'--user','rphosted',
+            '--cd','~','--exec','uname','-sm')
+          if ($nativeProbe -cne 'Linux x86_64') { throw 'Modern WSL CLI does not support the actual native transport flags.' }
           [ordered]@{
             source = $env:EXPECTED_SOURCE; distro = $distro; wsl_generation = 1
             rootfs_sha256 = $rootfsSha; elf_sha256 = $serverSha; server_name = $serverName
@@ -355,6 +399,7 @@ jobs:
                   'LOCALAPPDATA','APPDATA','ProgramData','ProgramFiles','ProgramFiles(x86)','USERNAME','USERDOMAIN',
                   'COMSPEC','PATHEXT','PSModulePath','HOMEDRIVE','HOMEPATH','PUBLIC','NUMBER_OF_PROCESSORS')) {
                 $value = [Environment]::GetEnvironmentVariable($name)
+                if ($name -eq 'PATH') { $value = "$env:ProgramFiles\WSL;$value" }
                 if ($value) { $start.Environment[$name] = $value }
               }
               $start.Environment['ZED_STATELESS'] = '1'
@@ -391,7 +436,8 @@ jobs:
               $serverName = (Get-Content runtime-evidence/wsl-source.json -Raw | ConvertFrom-Json).server_name
               do {
                 $launchers = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($script:process.Id)" |
-                  Where-Object { $_.Name -ieq 'wsl.exe' -and $_.CommandLine.Contains('RP127Hosted2d339') -and
+                  Where-Object { $_.Name -ieq 'wsl.exe' -and $null -ne $_.CommandLine -and
+                    $_.CommandLine.Contains('RP127Hosted2d339') -and
                     $_.CommandLine.Contains($serverName) })
                 if ($launchers.Count -eq 1) { break }
                 Start-Sleep -Milliseconds 250
@@ -478,6 +524,7 @@ jobs:
           } catch {
             $gui.status = 'failed'
             $gui.error = $_.Exception.Message
+            $gui.original_error_record = ($_ | Out-String)
             throw
           } finally {
             try { Close-Owned } finally {
