@@ -1,4 +1,4 @@
-name: RP 1.27 delivered-binary hosted smoke
+name: RP 1.27 generated persistent profile upgrade
 on:
   push:
     branches:
@@ -12,7 +12,7 @@ jobs:
   windows-prebuilt:
     name: Delivered Windows synthetic GUI render and edit
     runs-on: windows-2022
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Download exact canonical Windows artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
@@ -79,7 +79,65 @@ jobs:
             wsl_runtime_tested = $false
             owner_acceptance = $false
           } | ConvertTo-Json | Set-Content runtime-evidence/source.json -Encoding utf8NoBOM
-      - name: Try bounded synthetic GUI render, edit, save and reopen
+      - name: Verify public baseline release without private profile input
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh api repos/JonathonRP/zed/releases/tags/rp-stable-20261106.1 | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.id -ne 439358160 -or $release.draft) {
+            throw 'Unexpected immutable public baseline release.'
+          }
+          $download = Join-Path $env:RUNNER_TEMP 'rp127-public-baseline-download'
+          New-Item -ItemType Directory -Path $download | Out-Null
+          $assets = @(
+            @{ id = 728116944; name = 'rp-release-manifest-20261106.1.json'; sha = '19cdc6f70f133786b64ec8257580d0491d2ec56528a141e33e591977cd93c265' },
+            @{ id = 728116943; name = 'RP-Fork-Release-Notes-20261106.1.md'; sha = '3fce9b5bf9af753582827ed0ec599913e3a806be5991626f264410a2300a8ec9' },
+            @{ id = 728117082; name = 'zed-rp-stable-20261106.1-windows-x86_64-portable.zip'; sha = 'f3f46b338cfaff260f68a0d1e53c019dbefb33f44debe83963c1470f34c1ca9a' }
+          )
+          foreach ($expected in $assets) {
+            $actual = @($release.assets | Where-Object id -eq $expected.id)
+            if ($actual.Count -ne 1 -or $actual[0].name -cne $expected.name -or
+                $actual[0].digest -cne "sha256:$($expected.sha)") { throw 'Baseline public asset identity changed.' }
+            gh release download rp-stable-20261106.1 --repo JonathonRP/zed --pattern $expected.name --dir $download
+            if ($LASTEXITCODE -ne 0) { throw 'Public baseline download failed.' }
+            if ((Get-FileHash (Join-Path $download $expected.name) -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected.sha) {
+              throw 'Public baseline downloaded bytes do not match the immutable digest.'
+            }
+          }
+          $env:GH_TOKEN = $null
+          $manifest = Get-Content (Join-Path $download $assets[0].name) -Raw | ConvertFrom-Json
+          if ($manifest.commit -cne '12ddb317483dae00f4c413c343e0a6f1ad263a77' -or
+              $manifest.upstream_version -cne '1.26.2' -or
+              $manifest.upstream_tag_commit -cne 'c4273271092b0287f7d181f616bd5171e0a2f70c') {
+            throw 'Baseline source/upstream identity mismatch.'
+          }
+          $metadata = Join-Path $env:RUNNER_TEMP 'rp127-public-baseline-metadata'
+          New-Item -ItemType Directory -Path $metadata | Out-Null
+          Copy-Item (Join-Path $download $assets[0].name) (Join-Path $metadata 'rp-release-manifest.json')
+          Copy-Item (Join-Path $download $assets[1].name) (Join-Path $metadata 'release-notes.md')
+          $product = Join-Path $env:RUNNER_TEMP 'rp127-public-baseline-portable'
+          Expand-Archive (Join-Path $download $assets[2].name) -DestinationPath $product
+          $exe = Join-Path $product 'Zed.exe'
+          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion
+          if (-not $version.StartsWith('1.26.2+stable.') -or -not $version.EndsWith($manifest.commit)) {
+            throw 'Baseline executable version does not bind its public source.'
+          }
+          $process = Start-Process $exe -ArgumentList @('--verify-rp-release-metadata', ('"' + $metadata + '"')) `
+            -PassThru -RedirectStandardOutput runtime-evidence/baseline-metadata.stdout.log `
+            -RedirectStandardError runtime-evidence/baseline-metadata.stderr.log
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id
+            throw 'Public baseline metadata verification timed out.'
+          }
+          if ($process.ExitCode -ne 0) { throw 'Public baseline embedded metadata verification failed.' }
+          @{
+            source = $manifest.commit; version = $version; metadata_exit_code = $process.ExitCode
+            executable_sha256 = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+            release_id = $release.id; assets = $assets; private_profile = $false
+          } | ConvertTo-Json -Depth 5 | Set-Content runtime-evidence/baseline-proof.json -Encoding utf8NoBOM
+      - name: Upgrade a copied generated persistent profile and reopen
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -109,15 +167,17 @@ jobs:
           }
           '@
           $exe = Join-Path $env:RUNNER_TEMP 'rp127-delivered-portable\Zed.exe'
+          $candidateExe = $exe
+          $baselineExe = Join-Path $env:RUNNER_TEMP 'rp127-public-baseline-portable\Zed.exe'
           $profile = Join-Path $env:RUNNER_TEMP 'rp127-synthetic-profile'
           $workspace = Join-Path $env:RUNNER_TEMP 'rp127-synthetic-workspace'
           $evidence = (Resolve-Path runtime-evidence).Path
           $gui = [ordered]@{
             source = $env:EXPECTED_SOURCE; canonical_run = 42910418431; run_id = $env:GITHUB_RUN_ID
             profile_kind = 'Fresh synthetic hosted data only, not a copied private profile'
-            stateless = $true; presentation = 'HWND swapchain, D3D11 still required; no force-WARP flag'
+            stateless = $false; presentation = 'HWND swapchain, D3D11 still required; no force-WARP flag'
             owner_acceptance = $false; wsl_runtime_tested = $false
-            visible_window_station = $false; passes = @(); catalog_snapshots = @(); status = 'not_started'
+            visible_window_station = $false; passes = @(); process_exits = @(); catalog_snapshots = @(); status = 'not_started'
           }
           $script:process = $null
           $script:stdout = $null
@@ -205,7 +265,10 @@ jobs:
             if (-not $script:stdout.Wait(5000) -or -not $script:stderr.Wait(5000)) { throw 'Owned GUI output did not close.' }
             [IO.File]::WriteAllText((Join-Path $evidence "gui-$script:pass.stdout.log"), $script:stdout.Result)
             [IO.File]::WriteAllText((Join-Path $evidence "gui-$script:pass.stderr.log"), $script:stderr.Result)
+            $exitCode = $script:process.ExitCode
+            $gui.process_exits += @{ pass = $script:pass; source = $phaseSource; exit_code = $exitCode }
             $script:process.Dispose(); $script:process = $null
+            if ($exitCode -ne 0) { throw "Owned profile process exited $exitCode." }
           }
           try {
             $flags = [RpGui+Flags]::new(); [uint32]$needed = 0
@@ -221,13 +284,47 @@ jobs:
               auto_update = $false; disable_ai = $true; restore_on_startup = 'none'
               telemetry = @{ diagnostics = $false; metrics = $false }
               context_servers = @{}; agent_servers = @{}
+              feature_flags = @{ 'acp-beta' = 'on'; 'rp-hosted-upgrade-control' = 'off' }
             } | ConvertTo-Json -Depth 4 | Set-Content "$profile\config\settings.json" -Encoding utf8NoBOM
             '[{"bindings":{"f7":["pane::ActivateItem",0],"f8":"editor::MoveToEnd","f9":"workspace::Save"}}]' |
               Set-Content "$profile\config\keymap.json" -Encoding utf8NoBOM
             $fixture = Join-Path $workspace 'hosted-fixture.txt'
             [IO.File]::WriteAllText($fixture, 'Hosted RP 1.27 fixture.')
             $expectedText = "Hosted RP 1.27 fixture. Saved by hosted UI.`r`n"
-            for ($script:pass = 1; $script:pass -le 2; $script:pass++) {
+            for ($script:pass = 1; $script:pass -le 3; $script:pass++) {
+              if ($script:pass -eq 1) {
+                $exe = $baselineExe
+                $phaseSource = '12ddb317483dae00f4c413c343e0a6f1ad263a77'
+              } else {
+                $exe = $candidateExe
+                $phaseSource = $env:EXPECTED_SOURCE
+              }
+              if ($script:pass -eq 2) {
+                $copy = Join-Path $env:RUNNER_TEMP 'rp127-generated-profile-copy'
+                $dbFiles = @(Get-ChildItem -LiteralPath (Join-Path $profile 'db') -Recurse -File)
+                if ($dbFiles.Count -eq 0) { throw 'Baseline did not generate persistent database files.' }
+                $inventory = @($dbFiles | ForEach-Object {
+                  @{
+                    relative_path = [IO.Path]::GetRelativePath($profile, $_.FullName)
+                    bytes = $_.Length
+                    sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                  }
+                })
+                Copy-Item -LiteralPath $profile -Destination $copy -Recurse
+                foreach ($entry in $inventory) {
+                  $copied = Join-Path $copy $entry.relative_path
+                  if ((Get-FileHash $copied -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256) {
+                    throw 'Generated database copy is not byte-identical before candidate startup.'
+                  }
+                }
+                @{
+                  baseline_source = '12ddb317483dae00f4c413c343e0a6f1ad263a77'
+                  candidate_source = $env:EXPECTED_SOURCE
+                  baseline_process_closed_before_copy = $true
+                  private_profile = $false; databases = $inventory
+                } | ConvertTo-Json -Depth 5 | Set-Content runtime-evidence/database-copy-proof.json -Encoding utf8NoBOM
+                $profile = $copy
+              }
               $before = Read-Log
               $start = [Diagnostics.ProcessStartInfo]::new($exe)
               $start.UseShellExecute = $false; $start.WorkingDirectory = $workspace
@@ -239,7 +336,6 @@ jobs:
                 $value = [Environment]::GetEnvironmentVariable($name)
                 if ($value) { $start.Environment[$name] = $value }
               }
-              $start.Environment['ZED_STATELESS'] = '1'
               $start.Environment['ZED_DISABLE_STAFF'] = '1'
               $start.Environment['ZED_ALLOW_EMULATED_GPU'] = '1'
               $start.Environment['GPUI_DISABLE_DIRECT_COMPOSITION'] = '1'
@@ -275,7 +371,7 @@ jobs:
               Key 0x76 0x41
               Start-Sleep -Milliseconds 500
               Capture "gui-$script:pass-fixture.png"
-              if ($script:pass -eq 1) {
+              if ($script:pass -eq 2) {
                 Key 0x77 0x42
                 Start-Sleep -Milliseconds 200
                 foreach ($character in ' Saved by hosted UI.'.ToCharArray()) {
@@ -292,8 +388,8 @@ jobs:
                 if ([IO.File]::ReadAllText($fixture) -cne $expectedText) {
                   throw 'Owned GUI did not save the exact synthetic edited fixture.'
                 }
-                Capture 'gui-1-edited-saved.png'
-              } elseif ([IO.File]::ReadAllText($fixture) -cne $expectedText) {
+                Capture 'gui-2-edited-saved.png'
+              } elseif ($script:pass -eq 3 -and [IO.File]::ReadAllText($fixture) -cne $expectedText) {
                 throw 'Synthetic saved fixture did not persist across a fresh GUI process.'
               }
               $catalogState = Join-Path $profile 'extensions\rp-catalog-state.json'
@@ -321,7 +417,7 @@ jobs:
                 Start-Sleep -Milliseconds 250
               } while ([DateTime]::UtcNow -lt $deadline)
               if (-not $catalogReady) { throw 'Fresh synthetic catalog bootstrap did not complete within 30 seconds.' }
-              $gui.passes += @{ pass = $script:pass; process_id = $script:process.Id; visible_owned_window = $true; rendered = $true }
+              $gui.passes += @{ pass = $script:pass; source = $phaseSource; process_id = $script:process.Id; visible_owned_window = $true; rendered = $true }
               Close-Owned
             }
             if ((Read-Log).Contains('invalid persisted RP catalog state') -or
@@ -334,6 +430,41 @@ jobs:
                 $closedRevision -lt $revision -or $closedState.digest -notmatch '^[0-9a-f]{64}$' -or
                 ($closedRevision -eq $revision -and $closedState.digest -cne $state.digest)) {
               throw 'Synthetic catalog state lost its accepted revision/digest after process shutdown.'
+            }
+            $env:RP_GENERATED_PROFILE = $profile
+            @'
+          import json, os, pathlib, sqlite3
+          root = pathlib.Path(os.environ["RP_GENERATED_PROFILE"])
+          proof = []
+          for path in (root / "db").rglob("*"):
+              if not path.is_file():
+                  continue
+              with path.open("rb") as source:
+                  if source.read(16) != b"SQLite format 3\x00":
+                      continue
+              connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+              try:
+                  result = connection.execute("PRAGMA quick_check").fetchall()
+                  if result != [("ok",)]:
+                      raise RuntimeError(f"SQLite integrity failed: {path}: {result}")
+                  proof.append({
+                      "path": str(path.relative_to(root)),
+                      "quick_check": result,
+                      "tables": [row[0] for row in connection.execute(
+                          "SELECT name FROM sqlite_master WHERE type = ?", ("table",)
+                      )],
+                  })
+              finally:
+                  connection.close()
+          if not proof:
+              raise RuntimeError("No real persistent SQLite databases were generated.")
+          pathlib.Path("runtime-evidence/database-integrity.json").write_text(json.dumps(proof, indent=2))
+          '@ | python -
+            if ($LASTEXITCODE -ne 0) { throw 'Copied-profile databases failed read-only SQLite integrity checks.' }
+            $settings = Get-Content "$profile\config\settings.json" -Raw | ConvertFrom-Json
+            if ($settings.feature_flags.'acp-beta' -cne 'on' -or
+                $settings.feature_flags.'rp-hosted-upgrade-control' -cne 'off') {
+              throw 'Existing string ACP override or unrelated flag changed during upgrade.'
             }
             $gui.status = 'passed'
             $gui.saved_fixture_sha256 = (Get-FileHash $fixture -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -362,7 +493,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rp-127-synthetic-windows-gui-2d339cac9a9ffa47e1621aab8602b1870b95c5d1
+          name: rp-127-generated-profile-upgrade-2d339cac9a9ffa47e1621aab8602b1870b95c5d1
           path: runtime-evidence/
           if-no-files-found: error
           retention-days: 7
