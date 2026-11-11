@@ -18,7 +18,7 @@ use gpui::{
 
 use language::Buffer;
 use platform_title_bar::PlatformTitleBar;
-use project::{Project, ProjectPath, Worktree, WorktreeId};
+use project::{DisableAiSettings, Project, ProjectPath, Worktree, WorktreeId};
 use release_channel::ReleaseChannel;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -525,6 +525,10 @@ pub fn init(cx: &mut App) {
 
 fn init_renderers(cx: &mut App) {
     cx.default_global::<SettingFieldRenderer>()
+        .add_renderer_erased(
+            TypeId::of::<pages::AcpBetaSettingField>(),
+            Box::new(pages::render_acp_beta_setting),
+        )
         .add_renderer::<UnimplementedSettingField>(
             |settings_window, item, _, settings_file, _, sub_field, _, cx| {
                 render_settings_item(
@@ -1844,6 +1848,7 @@ impl SettingsWindow {
                 last_is_staff = is_staff;
                 this.rebuild_pages(window, cx);
             }
+            cx.notify();
         })
         .detach();
 
@@ -3077,7 +3082,7 @@ impl SettingsWindow {
             "Focus Navbar"
         };
 
-        let mut key_context = KeyContext::new_with_defaults();
+        let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("NavigationMenu");
         key_context.add("menu");
         if self.search_bar.focus_handle(cx).is_focused(window) {
@@ -4351,6 +4356,7 @@ impl SettingsWindow {
         self.sandbox_host_validation_error = None;
         self.sub_page_stack
             .push(SubPage::new(sub_page_link, section_header));
+        self.retry_llm_provider_authentication(cx);
         self.content_focus_handle.focus_handle(cx).focus(window, cx);
         cx.notify();
     }
@@ -4561,8 +4567,20 @@ impl SettingsWindow {
         {
             self.skill_creator_page = None;
         }
+        self.retry_llm_provider_authentication(cx);
         self.content_focus_handle.focus_handle(cx).focus(window, cx);
         cx.notify();
+    }
+
+    fn retry_llm_provider_authentication(&self, cx: &mut Context<Self>) {
+        if self.sub_page_stack.last().is_some_and(|sub_page| {
+            sub_page.link.json_path == Some("llm_providers")
+                && sub_page.link.title.as_ref() == "LLM Providers"
+        }) && !DisableAiSettings::get_global(cx).disable_ai
+        {
+            language_model::LanguageModelRegistry::global(cx)
+                .update(cx, |registry, cx| registry.retry_authentication(cx));
+        }
     }
 
     pub(crate) fn active_project(&self, cx: &App) -> Option<Entity<Project>> {
@@ -5429,6 +5447,72 @@ fn render_icon_theme_picker(
 pub mod test {
 
     use super::*;
+    use credentials_provider::test_support::FakeCredentialsProvider;
+    use language_model::{ApiKeyState, EnvVar, LanguageModelProviderState, LanguageModelRegistry};
+    use language_models::provider::open_ai_compatible::OpenAiCompatibleLanguageModelProvider;
+
+    #[gpui::test]
+    fn acp_beta_experimental_setting_is_searchable_and_user_scoped(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            register_settings(cx);
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state, cx);
+            cx.set_global(feature_flags::FeatureFlagStore::default());
+            init_renderers(cx);
+            let pages = page_data::settings_data(cx);
+            let experimental = pages
+                .into_iter()
+                .find(|page| page.title == "Experimental")
+                .expect("Experimental is visible without a staff gate");
+            assert_eq!(experimental.items[0].header_text(), Some("External Agents"));
+            let SettingsPageItem::SettingItem(item) = &experimental.items[1] else {
+                panic!("ACP v2 must be a setting field");
+            };
+            assert_eq!(item.title, "ACP v2");
+            assert_eq!(item.files, USER);
+            assert_eq!(item.field.json_path(), Some("feature_flags.acp-beta"));
+            assert!(
+                cx.default_global::<SettingFieldRenderer>()
+                    .renderers
+                    .borrow()
+                    .contains_key(&AnySettingField::type_id(item.field.as_ref()))
+            );
+
+            cx.new(|cx| {
+                let mut settings_window = SettingsWindow::test(window, cx);
+                settings_window.pages = vec![experimental];
+                settings_window.build_search_index();
+                assert_eq!(
+                    settings_window.filter_by_json_path("#feature_flags.acp-beta"),
+                    vec![1],
+                );
+                let index = settings_window.search_index.as_ref().expect("search index");
+                let words = &index.documents[1].words;
+                for word in [
+                    "experimental",
+                    "external",
+                    "agents",
+                    "acp",
+                    "v2",
+                    "beta",
+                    "mcp",
+                ] {
+                    assert!(words.iter().any(|candidate| candidate == word), "{word}");
+                }
+                for file in [SettingsUiFile::User, SettingsUiFile::Server("test")] {
+                    settings_window.current_file = file.clone();
+                    settings_window.build_filter_table();
+                    settings_window.filter_matches_to_file();
+                    assert_eq!(
+                        settings_window.filter_table[0],
+                        vec![file == SettingsUiFile::User; 2],
+                    );
+                }
+                settings_window
+            });
+        });
+    }
 
     #[gpui::test]
     fn registers_lsp_document_color_inlay_position_renderer(cx: &mut gpui::TestAppContext) {
@@ -7312,6 +7396,76 @@ pub mod test {
                 );
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn test_llm_provider_authentication_and_settings_retry(cx: &mut gpui::TestAppContext) {
+        let url = "https://settings-provider.example/v1";
+        let credentials = Arc::new(FakeCredentialsProvider::default());
+        let release = credentials.defer_read(url);
+        let provider = cx.update(|cx| {
+            register_settings(cx);
+            let app_state = AppState::test(cx);
+            AppState::set_global(app_state.clone(), cx);
+            let settings = r#"{"language_models":{"openai_compatible":{
+                "settings-retry":{"api_url":"https://settings-provider.example/v1",
+                "available_models":[]}
+            }}}"#;
+            cx.update_global::<SettingsStore, _>(|store, cx| {
+                store
+                    .set_user_settings(settings, cx)
+                    .expect("provider settings");
+            });
+            let provider = Arc::new(OpenAiCompatibleLanguageModelProvider::new(
+                Arc::from("settings-retry"),
+                app_state.client.http_client(),
+                credentials.clone(),
+                cx,
+            ));
+            let env_var = EnvVar {
+                name: SharedString::from("TEST_SETTINGS_API_KEY"),
+                value: None,
+            };
+            let state = provider.observable_entity().expect("provider state");
+            state.update(cx, |state, _| {
+                state.api_key_state = ApiKeyState::new(SharedString::from(url), env_var);
+            });
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.register_provider(provider.clone(), cx);
+                registry.authenticate_providers(cx);
+            });
+            provider
+        });
+        let (settings_window, cx) =
+            cx.add_window_view(|window, cx| SettingsWindow::new(None, window, cx));
+        cx.run_until_parked();
+        for release in [None, Some(release)] {
+            if let Some(release) = release {
+                release.send(()).expect("authentication remains live");
+                cx.run_until_parked();
+            }
+            cx.cx.update(|cx| {
+                LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                    registry.register_provider(provider.clone(), cx);
+                    registry.authenticate_providers(cx);
+                    registry.authenticate_providers(cx);
+                });
+            });
+            cx.run_until_parked();
+            credentials.assert_reads(&[url]);
+        }
+        cx.cx
+            .update(|cx| open_settings_editor(Some("llm_providers"), None, None, cx));
+        cx.run_until_parked();
+        credentials.assert_reads(&[url; 2]);
+        settings_window.update(cx, |_, cx| cx.notify());
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(1000.), px(700.)),
+            |_, _| settings_window.clone().into_any_element(),
+        );
+        cx.run_until_parked();
+        credentials.assert_reads(&[url; 2]);
     }
 
     fn settings_window_with_items(

@@ -13,7 +13,7 @@
     "previous_upstream_version": "1.20.0"
   },
   "upstream_repository": "zed-industries/zed",
-  "upstream_tag": "v1.26.2",
-  "upstream_tag_commit": "c4273271092b0287f7d181f616bd5171e0a2f70c",
-  "upstream_version": "1.26.2"
+  "upstream_tag": "v1.27.0",
+  "upstream_tag_commit": "c84af5b99cbc366d675064e52b23664a015b6e35",
+  "upstream_version": "1.27.0"
 }

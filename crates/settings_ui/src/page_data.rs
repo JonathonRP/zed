@@ -78,8 +78,25 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         collaboration_page(),
         ai_page(cx),
         network_page(),
+        experimental_page(),
         developer_page(cx),
     ]
+}
+
+fn experimental_page() -> SettingsPage {
+    SettingsPage {
+        title: "Experimental",
+        items: Box::new([
+            SettingsPageItem::SectionHeader("External Agents"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "ACP v2",
+                description: "Enable ACP v2 negotiation with `acp-beta` (`feature_flags.acp-beta`) and native MCP 2026-07-28 project files when the agent supports MCP-over-ACP. Requires a new agent connection; changing this does not restart agents or migrate active sessions. ACP v1 fallback remains available. Reset to restore the default rollout.",
+                field: Box::new(crate::pages::AcpBetaSettingField),
+                metadata: None,
+                files: USER,
+            }),
+        ]),
+    }
 }
 
 fn developer_page(cx: &App) -> SettingsPage {
@@ -174,7 +191,7 @@ fn general_page(cx: &App) -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "On New Window",
-                description: "What to show when opening a new window.",
+                description: "What to show when opening a new window; Readme opens a project's README when no items are open, leaving the pane empty if none is found.",
                 field: Box::new(SettingField {
                     organization_override: None,
                     json_path: Some("on_new_window"),

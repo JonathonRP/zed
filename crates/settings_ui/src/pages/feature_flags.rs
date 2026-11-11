@@ -1,9 +1,114 @@
-use feature_flags::{FeatureFlagDescriptor, FeatureFlagStore, FeatureFlagVariant};
-use fs::Fs;
-use gpui::{ScrollHandle, prelude::*};
-use ui::{Checkbox, ToggleState, prelude::*};
+use std::any::{Any, TypeId, type_name};
 
-use crate::SettingsWindow;
+use feature_flags::{
+    AcpBetaFeatureFlag, FeatureFlag, FeatureFlagAppExt as _, FeatureFlagDescriptor,
+    FeatureFlagStore, FeatureFlagValue as _, FeatureFlagVariant, PresenceFlag,
+};
+use fs::Fs;
+use gpui::{ReadGlobal as _, ScrollHandle, Stateful, prelude::*};
+use settings::{SettingsContent, SettingsStore};
+use ui::{Checkbox, Switch, ToggleState, prelude::*};
+
+use crate::{
+    AnySettingField, SettingItem, SettingsFieldMetadata, SettingsUiFile, SettingsWindow,
+    render_settings_item,
+};
+
+pub(crate) struct AcpBetaSettingField;
+
+impl AnySettingField for AcpBetaSettingField {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn type_name(&self) -> &'static str {
+        type_name::<Self>()
+    }
+
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<Self>()
+    }
+
+    fn file_set_in(&self, file: SettingsUiFile, cx: &App) -> (settings::SettingsFile, bool) {
+        let (file, _) = SettingsStore::global(cx).get_value_from_file(
+            file.to_settings(),
+            |content: &SettingsContent| {
+                content
+                    .feature_flags
+                    .as_ref()?
+                    .get(AcpBetaFeatureFlag::NAME)
+            },
+        );
+        // Feature flags resolve runtime defaults even without a raw JSON default.
+        (file, true)
+    }
+
+    fn reset_to_default_fn(
+        &self,
+        current_file: &SettingsUiFile,
+        file_set_in: &settings::SettingsFile,
+        cx: &App,
+    ) -> Option<Box<dyn Fn(&mut Window, &mut App)>> {
+        if *current_file != SettingsUiFile::User
+            || *file_set_in != settings::SettingsFile::User
+            || FeatureFlagStore::override_for(AcpBetaFeatureFlag::NAME, cx).is_none()
+        {
+            return None;
+        }
+
+        Some(Box::new(|_, cx| {
+            FeatureFlagStore::clear_override(AcpBetaFeatureFlag::NAME, <dyn Fs>::global(cx), cx);
+        }))
+    }
+
+    fn json_path(&self) -> Option<&'static str> {
+        Some("feature_flags.acp-beta")
+    }
+
+    fn is_overridden_by_organization(&self, _cx: &App) -> bool {
+        false
+    }
+}
+
+fn set_acp_beta_enabled(enabled: bool, cx: &App) {
+    let value = if enabled {
+        PresenceFlag::On
+    } else {
+        PresenceFlag::Off
+    };
+    FeatureFlagStore::set_override(
+        AcpBetaFeatureFlag::NAME,
+        value.override_key().to_string(),
+        <dyn Fs>::global(cx),
+        cx,
+    );
+}
+
+pub(crate) fn render_acp_beta_setting(
+    settings_window: &SettingsWindow,
+    item: &SettingItem,
+    settings_file: SettingsUiFile,
+    _metadata: Option<&SettingsFieldMetadata>,
+    sub_field: bool,
+    _window: &mut Window,
+    cx: &mut Context<SettingsWindow>,
+) -> Stateful<Div> {
+    let state = if cx.has_flag::<AcpBetaFeatureFlag>() {
+        ToggleState::Selected
+    } else {
+        ToggleState::Unselected
+    };
+    let control = Switch::new("acp-beta", state)
+        .tab_index(0_isize)
+        .aria_label(item.title)
+        .aria_description(item.description)
+        .disabled(AcpBetaFeatureFlag::enabled_for_all())
+        .on_click(|state, _, cx| {
+            set_acp_beta_enabled(*state == ToggleState::Selected, cx);
+        })
+        .into_any_element();
+    render_settings_item(settings_window, item, settings_file, control, sub_field, cx)
+}
 
 pub(crate) fn render_feature_flags_page(
     _settings_window: &SettingsWindow,
@@ -129,4 +234,129 @@ fn render_flag_variants(
     });
 
     h_flex().gap_4().flex_wrap().children(row_items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs::FakeFs;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    async fn acp_beta_persists_override_and_reset_restores_rollout(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(paths::settings_file().parent().expect("settings parent"))
+            .await
+            .expect("create fake settings directory");
+        let initial_settings = r#"{"feature_flags":{"unrelated-flag":"custom"},"ui_font_size":17}"#;
+        fs.insert_file(paths::settings_file(), initial_settings.as_bytes().to_vec())
+            .await;
+        cx.update(|cx| {
+            let mut store = SettingsStore::test(cx);
+            store
+                .set_user_settings(initial_settings, cx)
+                .result()
+                .expect("load settings");
+            cx.set_global(store);
+            <dyn Fs>::set_global(fs.clone(), cx);
+            FeatureFlagStore::init(cx);
+            cx.update_global::<FeatureFlagStore, _>(|store, _| {
+                store.update_server_flags(false, vec![AcpBetaFeatureFlag::NAME.into()]);
+            });
+            assert!(cx.has_flag::<AcpBetaFeatureFlag>());
+            assert!(
+                AcpBetaSettingField
+                    .reset_to_default_fn(
+                        &SettingsUiFile::User,
+                        &settings::SettingsFile::Default,
+                        cx,
+                    )
+                    .is_none()
+            );
+        });
+
+        for enabled in [true, false] {
+            cx.update(|cx| set_acp_beta_enabled(enabled, cx));
+            cx.run_until_parked();
+            let content = fs
+                .load(paths::settings_file())
+                .await
+                .expect("read persisted settings");
+            let content: serde_json::Value =
+                serde_json::from_str(&content).expect("valid settings JSON");
+            assert_eq!(
+                content["feature_flags"]["acp-beta"],
+                if enabled { "on" } else { "off" }
+            );
+            assert_eq!(content["feature_flags"]["unrelated-flag"], "custom");
+            assert_eq!(content["ui_font_size"], 17);
+            cx.update(|cx| {
+                assert_eq!(cx.has_flag::<AcpBetaFeatureFlag>(), enabled);
+                assert_eq!(
+                    FeatureFlagStore::override_for(AcpBetaFeatureFlag::NAME, cx),
+                    Some(if enabled { "on" } else { "off" }),
+                );
+                assert_eq!(
+                    AcpBetaSettingField.file_set_in(SettingsUiFile::User, cx),
+                    (settings::SettingsFile::User, true),
+                );
+            });
+        }
+
+        let window = cx.add_empty_window();
+        window.update(|window, cx| {
+            let reset = AcpBetaSettingField
+                .reset_to_default_fn(&SettingsUiFile::User, &settings::SettingsFile::User, cx)
+                .expect("explicit override can be reset");
+            reset(window, cx);
+        });
+        cx.run_until_parked();
+        let content = fs
+            .load(paths::settings_file())
+            .await
+            .expect("read reset settings");
+        let content: serde_json::Value =
+            serde_json::from_str(&content).expect("valid settings JSON");
+        assert!(content["feature_flags"].get("acp-beta").is_none());
+        assert_eq!(content["feature_flags"]["unrelated-flag"], "custom");
+        assert_eq!(content["ui_font_size"], 17);
+        cx.update(|cx| {
+            assert_eq!(
+                FeatureFlagStore::override_for(AcpBetaFeatureFlag::NAME, cx),
+                None,
+            );
+            assert!(cx.has_flag::<AcpBetaFeatureFlag>());
+            assert_eq!(
+                AcpBetaSettingField.file_set_in(SettingsUiFile::User, cx),
+                (settings::SettingsFile::Default, true),
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn acp_beta_creates_existing_string_setting_without_other_flags(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(paths::settings_file().parent().expect("settings parent"))
+            .await
+            .expect("create fake settings directory");
+        fs.insert_file(paths::settings_file(), b"{}".to_vec()).await;
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            <dyn Fs>::set_global(fs.clone(), cx);
+            FeatureFlagStore::init(cx);
+            set_acp_beta_enabled(true, cx);
+        });
+        cx.run_until_parked();
+        let content = fs
+            .load(paths::settings_file())
+            .await
+            .expect("read persisted settings");
+        let content: serde_json::Value =
+            serde_json::from_str(&content).expect("valid settings JSON");
+        assert_eq!(
+            content,
+            serde_json::json!({"feature_flags":{"acp-beta":"on"}})
+        );
+    }
 }

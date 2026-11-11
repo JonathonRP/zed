@@ -201,9 +201,15 @@ If an MCP tool does not appear in an External Agent, check both Zed's MCP server
 
 ### ACP v2 native project files
 
-The `acp-beta` feature flag enables ACP v2 negotiation for new connections:
+In the Settings Editor, open **Experimental → External Agents** and enable
+**ACP v2**. You can also search for `ACP v2`, `acp-beta`, or
+`#feature_flags.acp-beta`. This user-level switch displays the effective flag state,
+including the default rollout. Use **Reset to Default** to remove your ACP override
+without changing other feature flags.
 
-```json
+Or add this to your settings.json:
+
+```json [settings]
 {
   "feature_flags": {
     "acp-beta": "on"
@@ -211,7 +217,12 @@ The `acp-beta` feature flag enables ACP v2 negotiation for new connections:
 }
 ```
 
-This RP build permits this ACP-specific setting for non-staff users in release builds; it does not unlock other staff-only feature flags. Agents that explicitly support only ACP v1 are restarted with a fresh v1 connection. Set the flag to `"off"` to use v1 for subsequent connections.
+This RP build permits this ACP-specific setting for non-staff users in release
+builds; it does not unlock other staff-only feature flags. Changes require a new
+agent connection. Changing the switch does not restart agents or migrate active
+sessions. When negotiating a new connection, agents that explicitly support only
+ACP v1 are restarted with a fresh v1 connection. Turn the switch off (or set the
+flag to `"off"`) to use v1 for subsequent connections.
 
 When a v2 agent advertises MCP-over-ACP support, Zed attaches the `zed-project-files` server to new and resumed sessions. Its read-only `read_text_file` tool uses the same project buffer reader as v1 ACP file requests, including unsaved edits, read tracking and 1-based `line`/`limit` selection. It cannot open paths outside existing project worktrees, create worktrees, write files or execute commands. Read authority ends when the session owner is released, replaced or disconnected.
 

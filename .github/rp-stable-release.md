@@ -4,6 +4,34 @@
 second GitHub account. RP stable releases instead separate merge, compatibility
 evidence, and publication into auditable owner actions.
 
+## Manual v1.27.0 product port
+
+The source foundation is official `v1.27.0` at
+`c84af5b99cbc366d675064e52b23664a015b6e35`. This port integrates that exact
+upstream commit additively after the existing manual-port request and
+Experimental ACP v2 UI commits; it does not rewrite the pushed feature history.
+The source-base metadata, app version and upstream ancestry must agree before
+the normal PR compatibility check can succeed.
+
+The ACP adapter adopts upstream's SDK 3.6 initialization outcome handling and
+request-ID conversion while retaining RP's native MCP setup registration,
+response ordering, cancellation and session-ownership boundaries. Native setup
+and resume requests use the same checked v1-to-v2 request-ID conversion as the
+upstream prepared-request path. ACP v2 remains an opt-in and explicitly
+v1-only agents still use a fresh-process v1 fallback.
+
+The user Settings Editor exposes **Experimental > External Agents > ACP v2**
+without enabling generic staff overrides. It displays the effective flag value,
+writes the existing `feature_flags["acp-beta"]` string override and resets only
+that entry. Changes require new agent connections; they do not restart agents
+or migrate active sessions.
+
+The scoped stateless MCP 2026-07-28 project-file service, metadata RPC field
+numbers, updater identity, calendar floor, packaging checks, authorization
+records and release-control workflows remain RP behavior. Source compatibility
+does not authorize publication, installation, copied-profile acceptance or
+changes to the separate trusted automation control.
+
 ## Manual v1.26.2 product port
 
 The next product foundation is exactly official `v1.26.2` at

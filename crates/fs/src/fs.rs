@@ -874,7 +874,11 @@ impl Fs for RealFs {
             if options.ignore_if_exists {
                 return Ok(());
             } else {
-                anyhow::bail!("{target:?} already exists");
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{target:?} already exists"),
+                )
+                .into());
             }
         }
 
@@ -1462,6 +1466,7 @@ struct FakeFsState {
     buffered_events: Vec<PathEvent>,
     metadata_call_count: usize,
     read_dir_call_count: usize,
+    read_dir_hooks: BTreeMap<PathBuf, BoxFuture<'static, ()>>,
     path_write_counts: std::collections::HashMap<PathBuf, usize>,
     job_event_subscribers: Arc<Mutex<Vec<JobEventSender>>>,
     trash: Mutex<SlotMap<TrashId, (TrashedEntry, FakeFsEntry)>>,
@@ -1857,6 +1862,7 @@ impl FakeFs {
             events_paused: false,
             read_dir_call_count: 0,
             metadata_call_count: 0,
+            read_dir_hooks: Default::default(),
             path_write_counts: Default::default(),
             job_event_subscribers: Arc::new(Mutex::new(Vec::new())),
             trash: Mutex::new(SlotMap::with_key()),
@@ -2077,6 +2083,19 @@ impl FakeFs {
     /// including paths that were later unwatched.
     pub fn watch_calls(&self) -> Vec<PathBuf> {
         self.state.lock().watches.watch_calls.clone()
+    }
+
+    /// The paths currently registered with the watcher backend.
+    pub fn registered_watch_paths(&self) -> Vec<PathBuf> {
+        self.state.lock().watches.registered_paths.clone()
+    }
+
+    /// Runs once, immediately before the next `read_dir` resolves `path`.
+    pub fn before_read_dir(&self, path: impl AsRef<Path>, hook: BoxFuture<'static, ()>) {
+        self.state
+            .lock()
+            .read_dir_hooks
+            .insert(normalize_path(path.as_ref()), hook);
     }
 
     /// Creates `path` without emitting an event when `watch_path` is next
@@ -3137,7 +3156,11 @@ impl Fs for FakeFs {
                         // destroy a file the caller still expects to find.
                         moved = false;
                     } else {
-                        anyhow::bail!("path already exists: {new_path:?}");
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!("path already exists: {new_path:?}"),
+                        )
+                        .into());
                     }
                 }
                 btree_map::Entry::Vacant(e) => {
@@ -3403,6 +3426,10 @@ impl Fs for FakeFs {
     ) -> Result<Pin<Box<dyn Send + Stream<Item = Result<PathBuf>>>>> {
         self.simulate_random_delay().await;
         let path = normalize_path(path);
+        let hook = self.state.lock().read_dir_hooks.remove(&path);
+        if let Some(hook) = hook {
+            hook.await;
+        }
         let mut state = self.state.lock();
         state.read_dir_call_count += 1;
         let entry = state.entry(&path)?;
@@ -3677,26 +3704,136 @@ async fn file_id(path: impl AsRef<Path>) -> Result<u64> {
 }
 
 #[cfg(target_os = "windows")]
-fn atomic_replace<P: AsRef<Path>>(
-    replaced_file: P,
-    replacement_file: P,
-) -> windows::core::Result<()> {
+fn atomic_replace<P: AsRef<Path>>(replaced_file: P, replacement_file: P) -> io::Result<()> {
     use windows::{
         Win32::Storage::FileSystem::{REPLACE_FILE_FLAGS, ReplaceFileW},
         core::HSTRING,
     };
 
-    // If the file does not exist, create it.
-    let _ = std::fs::File::create_new(replaced_file.as_ref());
+    atomic_replace_or_create(
+        || {
+            unsafe {
+                ReplaceFileW(
+                    &HSTRING::from(replaced_file.as_ref().to_string_lossy().into_owned()),
+                    &HSTRING::from(replacement_file.as_ref().to_string_lossy().into_owned()),
+                    None,
+                    REPLACE_FILE_FLAGS::default(),
+                    None,
+                    None,
+                )
+            }
+            .map_err(|_| io::Error::last_os_error())
+        },
+        || rename_without_replace(replacement_file.as_ref(), replaced_file.as_ref()),
+    )
+}
 
-    unsafe {
-        ReplaceFileW(
-            &HSTRING::from(replaced_file.as_ref().to_string_lossy().into_owned()),
-            &HSTRING::from(replacement_file.as_ref().to_string_lossy().into_owned()),
-            None,
-            REPLACE_FILE_FLAGS::default(),
-            None,
-            None,
-        )
+#[cfg(target_os = "windows")]
+fn atomic_replace_or_create(
+    mut replace: impl FnMut() -> io::Result<()>,
+    create: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    match replace() {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            // Publishing an empty placeholder here leaves corrupt state if replacement fails.
+            match create() {
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => replace(),
+                result => result,
+            }
+        }
+        result => result,
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod atomic_replace_tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    #[test]
+    fn missing_replacement_does_not_create_empty_destination() {
+        let directory = TempDir::new().unwrap();
+        let destination = directory.path().join("rp-catalog-state.json");
+        let replacement = directory.path().join("missing");
+
+        assert!(atomic_replace(&destination, &replacement).is_err());
+        assert!(!destination.try_exists().unwrap());
+    }
+
+    #[test]
+    fn locked_replacement_does_not_publish_empty_state_and_can_retry() {
+        let directory = TempDir::new().unwrap();
+        let destination = directory.path().join("rp-catalog-state.json");
+        let replacement = directory.path().join("replacement");
+        let state = r#"{"revision":100,"digest":"accepted"}"#;
+        std::fs::write(&replacement, state).unwrap();
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&replacement)
+            .unwrap();
+
+        assert!(atomic_replace(&destination, &replacement).is_err());
+        assert!(!destination.try_exists().unwrap());
+        drop(locked);
+
+        atomic_replace(&destination, &replacement).unwrap();
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), state);
+    }
+
+    #[test]
+    fn failed_replacement_preserves_existing_catalog_state() {
+        let directory = TempDir::new().unwrap();
+        let destination = directory.path().join("rp-catalog-state.json");
+        let replacement = directory.path().join("missing");
+        let state = r#"{"revision":100,"digest":"accepted"}"#;
+        std::fs::write(&destination, state).unwrap();
+
+        assert!(atomic_replace(&destination, &replacement).is_err());
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), state);
+    }
+
+    #[test]
+    fn concurrent_create_retries_replace_and_preserves_winner_on_failure() {
+        for fail_retry in [false, true] {
+            let directory = TempDir::new().unwrap();
+            let destination = directory.path().join("rp-catalog-state.json");
+            let replacement = directory.path().join("replacement");
+            let previous = r#"{"revision":100,"digest":"accepted"}"#;
+            let next = r#"{"revision":101,"digest":"next"}"#;
+            std::fs::write(&replacement, next).unwrap();
+            let mut replace_calls = 0;
+
+            let result = atomic_replace_or_create(
+                || {
+                    replace_calls += 1;
+                    if replace_calls == 1 {
+                        Err(io::ErrorKind::NotFound.into())
+                    } else {
+                        atomic_replace(&destination, &replacement)
+                    }
+                },
+                || {
+                    // A second writer wins creation after the first replace saw no destination.
+                    std::fs::write(&destination, previous)?;
+                    let result = rename_without_replace(&replacement, &destination);
+                    assert_eq!(
+                        result.as_ref().unwrap_err().kind(),
+                        io::ErrorKind::AlreadyExists
+                    );
+                    if fail_retry {
+                        std::fs::remove_file(&replacement)?;
+                    }
+                    result
+                },
+            );
+
+            assert_eq!(replace_calls, 2);
+            assert_eq!(result.is_err(), fail_retry);
+            assert_eq!(
+                std::fs::read_to_string(&destination).unwrap(),
+                if fail_retry { previous } else { next }
+            );
+        }
     }
 }

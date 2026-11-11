@@ -18,7 +18,9 @@ pub(crate) use edit_prediction_provider_setup::render_edit_prediction_setup_page
 pub(crate) use external_agents_page::{
     CustomAgentForm, render_add_agent_popover, render_external_agents_page,
 };
-pub(crate) use feature_flags::render_feature_flags_page;
+pub(crate) use feature_flags::{
+    AcpBetaSettingField, render_acp_beta_setting, render_feature_flags_page,
+};
 pub(crate) use llm_providers_page::{
     LlmProviderForm, render_add_llm_provider_popover, render_llm_providers_page,
 };
