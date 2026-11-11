@@ -432,24 +432,33 @@ jobs:
                 throw 'Unable to size only the owned GUI window.'
               }
               Start-Sleep -Milliseconds 500
-              $deadline = [DateTime]::UtcNow.AddSeconds(50)
+              $deadline = [DateTime]::UtcNow.AddSeconds(75)
               $serverName = (Get-Content runtime-evidence/wsl-source.json -Raw | ConvertFrom-Json).server_name
               do {
                 $launchers = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($script:process.Id)" |
                   Where-Object { $_.Name -ieq 'wsl.exe' -and $null -ne $_.CommandLine -and
                     $_.CommandLine.Contains('RP127Hosted2d339') -and
-                    $_.CommandLine.Contains($serverName) })
-                if ($launchers.Count -eq 1) { break }
+                    $_.CommandLine.Contains($serverName) -and $_.CommandLine -match '\bexec\b' })
+                $script:process.Refresh()
+                $log = Read-Log
+                $phaseLog = if ($log.Length -ge $before.Length) { $log.Substring($before.Length) } else { $log }
+                $ready = $launchers.Count -eq 1 -and $phaseLog.Contains('(remote server) accepted new connections') -and
+                  $script:process.MainWindowTitle.Contains('hosted-fixture.txt')
+                if ($ready) { break }
                 Start-Sleep -Milliseconds 250
               } while ([DateTime]::UtcNow -lt $deadline)
-              if ($launchers.Count -ne 1 -or -not (Read-Log).Contains('Connecting to WSL distro RP127Hosted2d339')) {
-                throw 'Native GUI did not launch the exact source-bound server through actual WSL transport.'
+              if (-not $ready) {
+                throw 'Native WSL did not produce an owned exec launcher, new accepted connection and actual fixture window.'
               }
               $gui.remote_launchers += @{ pass = $script:pass; gui_pid = $script:process.Id;
-                launcher_pid = $launchers[0].ProcessId; command_line = $launchers[0].CommandLine }
-              Start-Sleep -Seconds 3
+                launcher_pid = $launchers[0].ProcessId; command_line = $launchers[0].CommandLine;
+                window_title = $script:process.MainWindowTitle }
+              $window = Owned-Window
+              if (-not [RpGui]::SetWindowPos($window, [IntPtr]::Zero, 0, 0, 1280, 900, 0x0014)) {
+                throw 'Unable to size actual loaded remote fixture window.'
+              }
+              Start-Sleep -Milliseconds 500
               Capture "gui-$script:pass-rendered.png"
-              Trust-SyntheticFixture
               Start-Sleep -Milliseconds 500
               Key 0x76 0x41
               Start-Sleep -Milliseconds 500
