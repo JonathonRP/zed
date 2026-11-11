@@ -9,60 +9,360 @@ permissions:
 env:
   EXPECTED_SOURCE: 2d339cac9a9ffa47e1621aab8602b1870b95c5d1
 jobs:
-  linux-prebuilt:
-    name: Prebuilt Linux remote-server startup
-    runs-on: ubuntu-22.04
+  windows-prebuilt:
+    name: Delivered Windows synthetic GUI render and edit
+    runs-on: windows-2022
     timeout-minutes: 10
     steps:
-      - name: Download exact canonical Linux artifact
+      - name: Download exact canonical Windows artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           repository: JonathonRP/zed
           run-id: 42910418431
           github-token: ${{ github.token }}
-          name: rp-profile-compatibility-linux-x86_64-2d339cac9a9ffa47e1621aab8602b1870b95c5d1
-          path: canonical-linux
-      - name: Verify and execute only source-matched server version
-        shell: bash
+          name: rp-profile-compatibility-windows-x86_64-2d339cac9a9ffa47e1621aab8602b1870b95c5d1
+          path: canonical-windows
+      - name: Download exact canonical metadata
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          repository: JonathonRP/zed
+          run-id: 42910418431
+          github-token: ${{ github.token }}
+          name: rp-profile-compatibility-metadata-2d339cac9a9ffa47e1621aab8602b1870b95c5d1
+          path: canonical-metadata
+      - name: Run bounded delivered-binary metadata diagnostic
+        shell: pwsh
         run: |
-          set -euo pipefail
-          mkdir runtime-evidence
-          python3 - <<'PY'
-          import gzip, hashlib, json, os, pathlib, shutil
-          manifest = json.loads(pathlib.Path("canonical-linux/linux-source-identity.json").read_text())
-          assert manifest["commit"] == os.environ["EXPECTED_SOURCE"]
-          assert manifest["upstream_tag_commit"] == "c84af5b99cbc366d675064e52b23664a015b6e35"
-          compressed = pathlib.Path("canonical-linux") / manifest["asset_names"]["linux_x86_64_remote_server"]
-          assert hashlib.sha256(compressed.read_bytes()).hexdigest() == "12914848c91aff46532d233ada318b85315795c81f6909d8aba604201c082513"
-          executable = pathlib.Path(os.environ["RUNNER_TEMP"]) / "rp127-remote-server"
-          with gzip.open(compressed, "rb") as source, executable.open("xb") as destination:
-              shutil.copyfileobj(source, destination)
-          digest_state = hashlib.sha256()
-          with executable.open("rb") as source:
-              for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                  digest_state.update(chunk)
-          digest = digest_state.hexdigest()
-          assert digest == "59c81b0d93385f1709e101ad3c69685332398597db1b0442fb3da7da0112f0ae"
-          executable.chmod(0o700)
-          pathlib.Path("runtime-evidence/source.json").write_text(json.dumps({
-              "source": manifest["commit"], "run_id": os.environ["GITHUB_RUN_ID"],
-              "workflow_definition_commit": os.environ["GITHUB_SHA"],
-              "canonical_run": 42910418431, "elf_sha256": digest,
-              "synthetic_hosted_runtime_only": True, "owner_acceptance": False,
-          }, indent=2))
-          PY
-          isolated_home="$RUNNER_TEMP/rp127-remote-home"
-          mkdir "$isolated_home"
-          timeout --signal=TERM --kill-after=5s 20s env -i \
-            HOME="$isolated_home" PATH="$PATH" \
-            "$RUNNER_TEMP/rp127-remote-server" version \
-            2>&1 | tee runtime-evidence/remote-version.log
-          grep -Fx '1.27.0' runtime-evidence/remote-version.log
-      - name: Preserve source-bound Linux runtime evidence
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path runtime-evidence | Out-Null
+          $manifest = Get-Content canonical-metadata/rp-release-manifest.json -Raw | ConvertFrom-Json
+          $packaged = Get-Content canonical-windows/windows-source-identity.json -Raw | ConvertFrom-Json
+          if ($manifest.commit -cne $env:EXPECTED_SOURCE -or $packaged.commit -cne $env:EXPECTED_SOURCE) {
+            throw 'Delivered artifact source mismatch.'
+          }
+          $portable = Join-Path (Resolve-Path canonical-windows) $manifest.asset_names.windows_x86_64_portable
+          if ((Get-FileHash $portable -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+              'c2a227c50b4364525ef0b2c40c477188f5bf59bc130af84abf4b8c512e102253') {
+            throw 'Portable archive digest mismatch.'
+          }
+          $product = Join-Path $env:RUNNER_TEMP 'rp127-delivered-portable'
+          Expand-Archive -LiteralPath $portable -DestinationPath $product
+          $exe = Join-Path $product 'Zed.exe'
+          $digest = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -cne '41edefb6ad42dbde200ab600c13a7d22f84923f9d7076890b5673b48a35542fa') {
+            throw 'Delivered RP executable digest mismatch.'
+          }
+          $metadata = (Resolve-Path canonical-metadata).Path
+          $process = Start-Process -FilePath $exe -ArgumentList @(
+            '--verify-rp-release-metadata', ('"' + $metadata + '"')
+          ) -PassThru -RedirectStandardOutput runtime-evidence/metadata.stdout.log `
+            -RedirectStandardError runtime-evidence/metadata.stderr.log
+          if (-not $process.WaitForExit(60000)) {
+            Stop-Process -Id $process.Id
+            throw 'Delivered metadata diagnostic exceeded its 60-second bound.'
+          }
+          if ($process.ExitCode -ne 0) { throw "Delivered metadata diagnostic exited $($process.ExitCode)." }
+          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($exe).ProductVersion
+          if (-not $version.StartsWith('1.27.0+stable.') -or -not $version.EndsWith($env:EXPECTED_SOURCE)) {
+            throw "Delivered product version does not bind source: $version"
+          }
+          [ordered]@{
+            source = $env:EXPECTED_SOURCE
+            run_id = $env:GITHUB_RUN_ID
+            workflow_definition_commit = $env:GITHUB_SHA
+            canonical_run = 42910418431
+            rp_executable_sha256 = $digest
+            product_version = $version
+            metadata_diagnostic_exit_code = $process.ExitCode
+            gui_runtime_tested = $false
+            private_profile_tested = $false
+            wsl_runtime_tested = $false
+            owner_acceptance = $false
+          } | ConvertTo-Json | Set-Content runtime-evidence/source.json -Encoding utf8NoBOM
+      - name: Try bounded synthetic GUI render, edit, save and reopen
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.Drawing
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class RpGui {
+              [StructLayout(LayoutKind.Sequential)]
+              public struct Flags { public int Inherit, Reserved; public uint Value; }
+              [StructLayout(LayoutKind.Sequential)]
+              public struct Rect { public int Left, Top, Right, Bottom; }
+              [StructLayout(LayoutKind.Sequential)]
+              public struct Point { public int X, Y; }
+              [DllImport("user32.dll")] public static extern IntPtr GetProcessWindowStation();
+              [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+              public static extern bool GetUserObjectInformation(IntPtr handle, int index, ref Flags flags, uint size, out uint needed);
+              [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+              [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
+              [DllImport("user32.dll", SetLastError = true)] public static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+              [DllImport("user32.dll", SetLastError = true)] public static extern bool PrintWindow(IntPtr hwnd, IntPtr hdc, uint flags);
+              [DllImport("user32.dll", SetLastError = true)] public static extern bool ClientToScreen(IntPtr hwnd, ref Point point);
+              [DllImport("user32.dll", SetLastError = true)]
+              public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
+              [DllImport("user32.dll", SetLastError = true)]
+              public static extern bool PostMessage(IntPtr hwnd, uint message, UIntPtr wparam, IntPtr lparam);
+          }
+          '@
+          $exe = Join-Path $env:RUNNER_TEMP 'rp127-delivered-portable\Zed.exe'
+          $profile = Join-Path $env:RUNNER_TEMP 'rp127-synthetic-profile'
+          $workspace = Join-Path $env:RUNNER_TEMP 'rp127-synthetic-workspace'
+          $evidence = (Resolve-Path runtime-evidence).Path
+          $gui = [ordered]@{
+            source = $env:EXPECTED_SOURCE; canonical_run = 42910418431; run_id = $env:GITHUB_RUN_ID
+            profile_kind = 'Fresh synthetic hosted data only, not a copied private profile'
+            stateless = $true; presentation = 'HWND swapchain, D3D11 still required; no force-WARP flag'
+            owner_acceptance = $false; wsl_runtime_tested = $false
+            visible_window_station = $false; passes = @(); catalog_snapshots = @(); status = 'not_started'
+          }
+          $script:process = $null
+          $script:stdout = $null
+          $script:stderr = $null
+          $script:pass = 0
+          function Read-Log {
+            $path = Join-Path $profile 'logs\Zed.log'
+            if (-not (Test-Path -LiteralPath $path)) { return '' }
+            $stream = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+            try {
+              $reader = [IO.StreamReader]::new($stream)
+              try { return $reader.ReadToEnd() } finally { $reader.Dispose() }
+            } finally { $stream.Dispose() }
+          }
+          function Owned-Window {
+            $script:process.Refresh()
+            if ($script:process.HasExited) { throw 'Owned GUI process exited before completing the smoke.' }
+            $actual = Get-CimInstance Win32_Process -Filter "ProcessId = $($script:process.Id)"
+            if ($actual.ExecutablePath -ine $exe -or -not $actual.CommandLine.Contains($profile)) {
+              throw 'Owned GUI executable/profile identity mismatch.'
+            }
+            $window = $script:process.MainWindowHandle
+            [uint32]$owner = 0
+            [void][RpGui]::GetWindowThreadProcessId($window, [ref]$owner)
+            if ($window -eq [IntPtr]::Zero -or $owner -ne $script:process.Id -or
+                -not [RpGui]::IsWindowVisible($window)) { throw 'An owned visible GUI window is required.' }
+            return $window
+          }
+          function Key([uint32]$Code, [int64]$Scan) {
+            $window = Owned-Window
+            if (-not [RpGui]::PostMessage($window, 0x100, [UIntPtr]$Code, [IntPtr](($Scan -shl 16) -bor 1L)) -or
+                -not [RpGui]::PostMessage($window, 0x101, [UIntPtr]$Code, [IntPtr](($Scan -shl 16) -bor 0xC0000001L))) {
+              throw 'Unable to queue a key only to the owned GUI window.'
+            }
+          }
+          function Capture([string]$Name) {
+            $window = Owned-Window
+            $rect = [RpGui+Rect]::new()
+            if (-not [RpGui]::GetWindowRect($window, [ref]$rect)) { throw 'Owned window dimensions unavailable.' }
+            $width = $rect.Right - $rect.Left; $height = $rect.Bottom - $rect.Top
+            if ($width -lt 100 -or $height -lt 100) { throw 'Owned GUI capture is too small.' }
+            $image = [Drawing.Bitmap]::new($width, $height)
+            $graphics = [Drawing.Graphics]::FromImage($image)
+            try {
+              $hdc = $graphics.GetHdc()
+              try {
+                if (-not [RpGui]::PrintWindow($window, $hdc, 2)) { throw 'Owned window capture failed.' }
+              } finally { $graphics.ReleaseHdc($hdc) }
+              $colors = [Collections.Generic.HashSet[int]]::new()
+              for ($y = 0; $y -lt $height; $y += 8) {
+                for ($x = 0; $x -lt $width; $x += 8) { [void]$colors.Add($image.GetPixel($x, $y).ToArgb()) }
+              }
+              $image.Save((Join-Path $evidence $Name), [Drawing.Imaging.ImageFormat]::Png)
+              if ($colors.Count -lt 16) { throw 'Owned capture lacks rendered color variation.' }
+            } finally { $graphics.Dispose(); $image.Dispose() }
+          }
+          function Trust-SyntheticFixture {
+            $window = Owned-Window
+            $rect = [RpGui+Rect]::new()
+            $origin = [RpGui+Point]::new()
+            if (-not [RpGui]::GetWindowRect($window, [ref]$rect) -or
+                -not [RpGui]::ClientToScreen($window, [ref]$origin)) { throw 'Owned click coordinates unavailable.' }
+            # Position measured from the actual synthetic-only trust-dialog capture.
+            $x = [int](($rect.Right - $rect.Left) * 0.714) + $rect.Left - $origin.X
+            $y = [int](($rect.Bottom - $rect.Top) * 0.468) + $rect.Top - $origin.Y
+            if ($x -lt 0 -or $y -lt 0 -or $x -ge $rect.Right - $rect.Left -or $y -ge $rect.Bottom - $rect.Top) {
+              throw 'Synthetic trust click would be outside the owned window.'
+            }
+            $position = [IntPtr](($y -shl 16) -bor $x)
+            foreach ($event in @(@{ message = 0x200; buttons = 0 }, @{ message = 0x201; buttons = 1 }, @{ message = 0x202; buttons = 0 })) {
+              if (-not [RpGui]::PostMessage($window, $event.message, [UIntPtr]$event.buttons, $position)) {
+                throw 'Unable to click only the owned synthetic project trust dialog.'
+              }
+            }
+          }
+          function Close-Owned {
+            if ($null -eq $script:process) { return }
+            if (-not $script:process.HasExited) {
+              if (-not $script:process.CloseMainWindow() -or -not $script:process.WaitForExit(15000)) {
+                Stop-Process -Id $script:process.Id
+                [void]$script:process.WaitForExit(5000)
+                throw 'Owned synthetic GUI failed to close gracefully within 15 seconds.'
+              }
+            }
+            if (-not $script:stdout.Wait(5000) -or -not $script:stderr.Wait(5000)) { throw 'Owned GUI output did not close.' }
+            [IO.File]::WriteAllText((Join-Path $evidence "gui-$script:pass.stdout.log"), $script:stdout.Result)
+            [IO.File]::WriteAllText((Join-Path $evidence "gui-$script:pass.stderr.log"), $script:stderr.Result)
+            $script:process.Dispose(); $script:process = $null
+          }
+          try {
+            $flags = [RpGui+Flags]::new(); [uint32]$needed = 0
+            if (-not [RpGui]::GetUserObjectInformation([RpGui]::GetProcessWindowStation(), 1, [ref]$flags, 12, [ref]$needed)) {
+              throw 'Unable to inspect hosted window station.'
+            }
+            $gui.visible_window_station = ($flags.Value -band 1) -ne 0
+            if (-not $gui.visible_window_station) {
+              throw 'Hosted runner has no interactive visible window station; GUI not launched, no GUI pass claimed.'
+            }
+            New-Item -ItemType Directory -Path "$profile\config", $workspace | Out-Null
+            @{
+              auto_update = $false; disable_ai = $true; restore_on_startup = 'none'
+              telemetry = @{ diagnostics = $false; metrics = $false }
+              context_servers = @{}; agent_servers = @{}
+            } | ConvertTo-Json -Depth 4 | Set-Content "$profile\config\settings.json" -Encoding utf8NoBOM
+            '[{"bindings":{"f7":["pane::ActivateItem",0],"f8":"editor::MoveToEnd","f9":"workspace::Save"}}]' |
+              Set-Content "$profile\config\keymap.json" -Encoding utf8NoBOM
+            $fixture = Join-Path $workspace 'hosted-fixture.txt'
+            [IO.File]::WriteAllText($fixture, 'Hosted RP 1.27 fixture.')
+            $expectedText = "Hosted RP 1.27 fixture. Saved by hosted UI.`r`n"
+            for ($script:pass = 1; $script:pass -le 2; $script:pass++) {
+              $before = Read-Log
+              $start = [Diagnostics.ProcessStartInfo]::new($exe)
+              $start.UseShellExecute = $false; $start.WorkingDirectory = $workspace
+              $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+              $start.Environment.Clear()
+              foreach ($name in @('SystemRoot','SystemDrive','WINDIR','TEMP','TMP','PATH','USERPROFILE',
+                  'LOCALAPPDATA','APPDATA','ProgramData','ProgramFiles','ProgramFiles(x86)','USERNAME','USERDOMAIN',
+                  'COMSPEC','PATHEXT','PSModulePath','HOMEDRIVE','HOMEPATH','PUBLIC','NUMBER_OF_PROCESSORS')) {
+                $value = [Environment]::GetEnvironmentVariable($name)
+                if ($value) { $start.Environment[$name] = $value }
+              }
+              $start.Environment['ZED_STATELESS'] = '1'
+              $start.Environment['ZED_DISABLE_STAFF'] = '1'
+              $start.Environment['ZED_ALLOW_EMULATED_GPU'] = '1'
+              $start.Environment['GPUI_DISABLE_DIRECT_COMPOSITION'] = '1'
+              $start.Environment['ZED_UPDATE_EXPLANATION'] = 'Synthetic hosted smoke: updater disabled'
+              $start.Environment['RUST_LOG'] = 'info'
+              foreach ($argument in @('--foreground', '--user-data-dir', $profile, $fixture)) {
+                $start.ArgumentList.Add($argument)
+              }
+              $script:process = [Diagnostics.Process]::Start($start)
+              $script:stdout = $script:process.StandardOutput.ReadToEndAsync()
+              $script:stderr = $script:process.StandardError.ReadToEndAsync()
+              $deadline = [DateTime]::UtcNow.AddSeconds(50)
+              do {
+                $script:process.Refresh()
+                if ($script:process.HasExited) { throw 'Hosted GUI process exited before rendering.' }
+                $log = Read-Log
+                $newLog = if ($log.Length -ge $before.Length) { $log.Substring($before.Length) } else { $log }
+                if ($newLog -match 'starting headless|failed to initialize DirectX|panicked at') {
+                  throw "Hosted GUI did not initialize a renderer: $newLog"
+                }
+                if ($newLog.Contains('Rendered first frame') -and $script:process.MainWindowHandle -ne [IntPtr]::Zero) { break }
+                Start-Sleep -Milliseconds 250
+              } while ([DateTime]::UtcNow -lt $deadline)
+              if (-not $newLog.Contains('Rendered first frame')) { throw 'No genuine rendered frame before the 50-second deadline.' }
+              $window = Owned-Window
+              if (-not [RpGui]::SetWindowPos($window, [IntPtr]::Zero, 0, 0, 1280, 900, 0x0014)) {
+                throw 'Unable to size only the owned GUI window.'
+              }
+              Start-Sleep -Milliseconds 500
+              Capture "gui-$script:pass-rendered.png"
+              Trust-SyntheticFixture
+              Start-Sleep -Milliseconds 500
+              Key 0x76 0x41
+              Start-Sleep -Milliseconds 500
+              Capture "gui-$script:pass-fixture.png"
+              if ($script:pass -eq 1) {
+                Key 0x77 0x42
+                Start-Sleep -Milliseconds 200
+                foreach ($character in ' Saved by hosted UI.'.ToCharArray()) {
+                  if (-not [RpGui]::PostMessage($window, 0x102, [UIntPtr][uint32]$character, [IntPtr]1)) {
+                    throw 'Unable to queue synthetic text to the owned GUI window.'
+                  }
+                }
+                Key 0x78 0x43
+                $deadline = [DateTime]::UtcNow.AddSeconds(10)
+                do {
+                  if ([IO.File]::ReadAllText($fixture) -ceq $expectedText) { break }
+                  Start-Sleep -Milliseconds 250
+                } while ([DateTime]::UtcNow -lt $deadline)
+                if ([IO.File]::ReadAllText($fixture) -cne $expectedText) {
+                  throw 'Owned GUI did not save the exact synthetic edited fixture.'
+                }
+                Capture 'gui-1-edited-saved.png'
+              } elseif ([IO.File]::ReadAllText($fixture) -cne $expectedText) {
+                throw 'Synthetic saved fixture did not persist across a fresh GUI process.'
+              }
+              $catalogState = Join-Path $profile 'extensions\rp-catalog-state.json'
+              $catalogReady = $false
+              $deadline = [DateTime]::UtcNow.AddSeconds(30)
+              do {
+                if ((Read-Log).Contains('invalid persisted RP catalog state')) {
+                  throw 'Fresh synthetic profile logged invalid persisted catalog state.'
+                }
+                if (Test-Path -LiteralPath $catalogState) {
+                  $length = (Get-Item -LiteralPath $catalogState).Length
+                  if ($length -eq 0) { throw 'Fresh synthetic profile published an empty catalog state.' }
+                  $state = Get-Content -LiteralPath $catalogState -Raw | ConvertFrom-Json
+                  [uint64]$revision = 0
+                  if (-not [uint64]::TryParse([string]$state.revision, [ref]$revision) -or
+                      $state.digest -notmatch '^[0-9a-f]{64}$') {
+                    throw 'Fresh synthetic catalog state does not contain a valid revision/digest.'
+                  }
+                  $gui.catalog_snapshots += @{
+                    pass = $script:pass; bytes = $length; revision = $revision; digest = $state.digest
+                  }
+                  $catalogReady = $true
+                  break
+                }
+                Start-Sleep -Milliseconds 250
+              } while ([DateTime]::UtcNow -lt $deadline)
+              if (-not $catalogReady) { throw 'Fresh synthetic catalog bootstrap did not complete within 30 seconds.' }
+              $gui.passes += @{ pass = $script:pass; process_id = $script:process.Id; visible_owned_window = $true; rendered = $true }
+              Close-Owned
+            }
+            if ((Read-Log).Contains('invalid persisted RP catalog state') -or
+                (Get-Item -LiteralPath $catalogState).Length -eq 0) {
+              throw 'Synthetic catalog state was invalid or empty after both owned processes closed.'
+            }
+            $closedState = Get-Content -LiteralPath $catalogState -Raw | ConvertFrom-Json
+            [uint64]$closedRevision = 0
+            if (-not [uint64]::TryParse([string]$closedState.revision, [ref]$closedRevision) -or
+                $closedRevision -lt $revision -or $closedState.digest -notmatch '^[0-9a-f]{64}$' -or
+                ($closedRevision -eq $revision -and $closedState.digest -cne $state.digest)) {
+              throw 'Synthetic catalog state lost its accepted revision/digest after process shutdown.'
+            }
+            $gui.status = 'passed'
+            $gui.saved_fixture_sha256 = (Get-FileHash $fixture -Algorithm SHA256).Hash.ToLowerInvariant()
+            $source = Get-Content runtime-evidence/source.json -Raw | ConvertFrom-Json
+            $source.gui_runtime_tested = $true
+            $source | ConvertTo-Json | Set-Content runtime-evidence/source.json -Encoding utf8NoBOM
+          } catch {
+            $gui.status = 'failed'
+            $gui.error = $_.Exception.Message
+            throw
+          } finally {
+            try { Close-Owned } finally {
+              $gui | ConvertTo-Json -Depth 6 | Set-Content runtime-evidence/gui.json -Encoding utf8NoBOM
+              [IO.File]::WriteAllText((Join-Path $evidence 'synthetic-zed.log'), (Read-Log))
+              if (Test-Path -LiteralPath "$workspace\hosted-fixture.txt") {
+                Copy-Item -LiteralPath "$workspace\hosted-fixture.txt" -Destination "$evidence\hosted-fixture.txt"
+              }
+              $catalogState = Join-Path $profile 'extensions\rp-catalog-state.json'
+              if (Test-Path -LiteralPath $catalogState) {
+                Get-Item -LiteralPath $catalogState | Select-Object Length |
+                  ConvertTo-Json | Set-Content runtime-evidence/catalog-state-file.json -Encoding utf8NoBOM
+              }
+            }
+          }
+      - name: Preserve source-bound Windows runtime evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rp-127-prebuilt-linux-runtime-2d339cac9a9ffa47e1621aab8602b1870b95c5d1
+          name: rp-127-synthetic-windows-gui-2d339cac9a9ffa47e1621aab8602b1870b95c5d1
           path: runtime-evidence/
           if-no-files-found: error
           retention-days: 7
